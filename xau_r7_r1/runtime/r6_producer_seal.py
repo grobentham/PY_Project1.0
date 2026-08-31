@@ -17,6 +17,7 @@ class ProducerSealError(RuntimeError):
 
 
 SEAL_VERSION = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V1"
+GENERATED_SEAL_FILENAME = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL.json"
 PRODUCER_MODULE_RELATIVE = "r7_runtime/r6_causal_producer.py"
 EVIDENCE_FILES: Tuple[str, ...] = (
     "R7_R1_R6_SOURCE_PROBE.json",
@@ -27,6 +28,7 @@ EVIDENCE_FILES: Tuple[str, ...] = (
     "R7_R1_R6_PRODUCER_PARITY.json",
 )
 ALLOWED_CANDIDATE_FILES = frozenset((PRODUCER_MODULE_RELATIVE,) + EVIDENCE_FILES)
+IGNORED_GENERATED_FILES = frozenset({GENERATED_SEAL_FILENAME})
 
 
 def _safe_relative(path: Path, root: Path) -> str:
@@ -51,6 +53,8 @@ def _candidate_inventory(candidate_root: Path) -> Dict[str, Path]:
         if not path.is_file():
             continue
         relative = _safe_relative(path, candidate_root)
+        if relative in IGNORED_GENERATED_FILES:
+            continue
         if relative in inventory:
             raise ProducerSealError("CANDIDATE_DUPLICATE_PATH:" + relative)
         inventory[relative] = path
