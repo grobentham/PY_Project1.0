@@ -57,7 +57,8 @@ jobs:
           foreach ($script in @(
             'xau_r7_r1/BUILD_R7_R1.ps1',
             'xau_r7_r1/PROBE_CANONICAL_R6_SOURCE.ps1',
-            'xau_r7_r1/EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1'
+            'xau_r7_r1/EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1',
+            'xau_r7_r1/SEAL_R6_PRODUCER_CANDIDATE.ps1'
           )) {
             $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile(
