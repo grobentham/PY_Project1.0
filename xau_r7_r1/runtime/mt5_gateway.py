@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Dict
+from typing import Dict, List
 
 from .constants import (
     COMMENT_PREFIX,
@@ -69,6 +69,29 @@ class MT5Gateway:
         if self.mt5 is None:
             raise GatewayError("MT5_NOT_CONNECTED")
         return self.mt5
+
+    def _positions(self) -> List:
+        mt5 = self._require()
+        rows = mt5.positions_get(symbol=SYMBOL)
+        if rows is None:
+            raise GatewayError(f"MT5_POSITIONS_QUERY_FAILED:{mt5.last_error()}")
+        return list(rows)
+
+    def _orders(self) -> List:
+        mt5 = self._require()
+        rows = mt5.orders_get(symbol=SYMBOL)
+        if rows is None:
+            raise GatewayError(f"MT5_ORDERS_QUERY_FAILED:{mt5.last_error()}")
+        return list(rows)
+
+    def _recent_deals(self, days: int = 30) -> List:
+        mt5 = self._require()
+        to_dt = datetime.now(timezone.utc)
+        from_dt = to_dt - timedelta(days=days)
+        rows = mt5.history_deals_get(from_dt, to_dt)
+        if rows is None:
+            raise GatewayError(f"MT5_HISTORY_DEALS_QUERY_FAILED:{mt5.last_error()}")
+        return list(rows)
 
     def assert_trading_permissions(self) -> None:
         mt5 = self._require()
@@ -146,9 +169,8 @@ class MT5Gateway:
         )
 
     def exposure_snapshot(self) -> ExposureSnapshot:
-        mt5 = self._require()
-        positions = list(mt5.positions_get(symbol=SYMBOL) or [])
-        orders = list(mt5.orders_get(symbol=SYMBOL) or [])
+        positions = self._positions()
+        orders = self._orders()
         position_lot = sum(float(p.volume) for p in positions)
         pending_lot = sum(float(o.volume_current) for o in orders)
         if not math.isfinite(position_lot) or not math.isfinite(pending_lot) or position_lot < 0 or pending_lot < 0:
@@ -285,18 +307,14 @@ class MT5Gateway:
         return result
 
     def find_intent_at_broker(self, client_intent_id: str) -> BrokerMatch:
-        mt5 = self._require()
         needle = (COMMENT_PREFIX + client_intent_id)[:31]
-        for p in mt5.positions_get(symbol=SYMBOL) or []:
+        for p in self._positions():
             if int(p.magic) == MAGIC and str(getattr(p, "comment", "")) == needle:
                 return BrokerMatch(True, "POSITION", int(p.ticket), "OPEN")
-        for o in mt5.orders_get(symbol=SYMBOL) or []:
+        for o in self._orders():
             if int(o.magic) == MAGIC and str(getattr(o, "comment", "")) == needle:
                 return BrokerMatch(True, "ORDER", int(o.ticket), "PENDING")
-        to_dt = datetime.now(timezone.utc)
-        from_dt = to_dt - timedelta(days=30)
-        deals = mt5.history_deals_get(from_dt, to_dt) or []
-        for d in deals:
+        for d in self._recent_deals(days=30):
             if int(getattr(d, "magic", 0)) == MAGIC and str(getattr(d, "comment", "")) == needle:
                 return BrokerMatch(True, "DEAL", int(d.ticket), "HISTORICAL")
         return BrokerMatch(False)
