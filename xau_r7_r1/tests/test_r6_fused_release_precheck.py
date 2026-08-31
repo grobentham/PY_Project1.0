@@ -8,6 +8,7 @@ from unittest import mock
 
 from r7_runtime.constants import CANONICAL_R6_ZIP_SHA256
 from r7_runtime.r6_fused_release_precheck import (
+    PRECHECK_VERSION,
     FusedReleasePrecheckError,
     verify_fused_release_precheck,
 )
@@ -27,10 +28,12 @@ class FusedReleasePrecheckTests(unittest.TestCase):
             "r7_runtime/r6_causal_producer.py": "1" * 64,
             "R7_R1_R6_SOURCE_PROBE.json": "2" * 64,
             "R7_R1_R6_SOURCE_BUNDLE_MANIFEST.json": "3" * 64,
-            "R7_R1_R6_REFERENCE_STREAM.jsonl": "4" * 64,
-            "R7_R1_R6_PRODUCER_STREAM.jsonl": "5" * 64,
-            "R7_R1_R6_PARITY_ISOLATION.json": "6" * 64,
-            "R7_R1_R6_PRODUCER_PARITY.json": "7" * 64,
+            "R7_R1_R6_PARITY_FIXTURES.jsonl": "4" * 64,
+            "R7_R1_R6_PRODUCER_REPLAY.json": "5" * 64,
+            "R7_R1_R6_REFERENCE_STREAM.jsonl": "6" * 64,
+            "R7_R1_R6_PRODUCER_STREAM.jsonl": "7" * 64,
+            "R7_R1_R6_PARITY_ISOLATION.json": "8" * 64,
+            "R7_R1_R6_PRODUCER_PARITY.json": "9" * 64,
         }
         return {
             "seal_version": SEAL_VERSION,
@@ -38,8 +41,13 @@ class FusedReleasePrecheckTests(unittest.TestCase):
             "candidate_files_sha256": hashes,
             "producer_module": "r7_runtime/r6_causal_producer.py",
             "producer_module_sha256": hashes["r7_runtime/r6_causal_producer.py"],
-            "admission_version": "TEST_ADMISSION_V3",
+            "fixture_corpus_sha256": hashes["R7_R1_R6_PARITY_FIXTURES.jsonl"],
+            "producer_replay_attestation_sha256": hashes["R7_R1_R6_PRODUCER_REPLAY.json"],
+            "producer_stream_sha256": hashes["R7_R1_R6_PRODUCER_STREAM.jsonl"],
+            "admission_version": "TEST_ADMISSION_V4",
             "admission_ready": True,
+            "trusted_producer_replay_pass": True,
+            "producer_source_policy_pass": True,
             "baseline_mutated": False,
             "execution_unlocked": False,
             "final_holdout_accessed": False,
@@ -66,8 +74,12 @@ class FusedReleasePrecheckTests(unittest.TestCase):
                 return_value=dict(seal),
             ):
                 report = verify_fused_release_precheck(runtime, candidate, seal_path)
+            self.assertEqual(report["precheck_version"], PRECHECK_VERSION)
             self.assertTrue(report["eligible_for_future_fused_build"])
             self.assertTrue(report["fresh_seal_matches_supplied_seal"])
+            self.assertTrue(report["trusted_producer_replay_pass"])
+            self.assertTrue(report["producer_source_policy_pass"])
+            self.assertEqual(report["fixture_corpus_sha256"], seal["fixture_corpus_sha256"])
             self.assertFalse(report["fused_package_created"])
             self.assertFalse(report["readiness_switch_changed"])
             self.assertFalse(report["execution_unlocked"])
@@ -96,14 +108,14 @@ class FusedReleasePrecheckTests(unittest.TestCase):
                 with self.assertRaisesRegex(FusedReleasePrecheckError, "BASELINE_PRODUCER_LOCK_NOT_FALSE"):
                     verify_fused_release_precheck(runtime, candidate, seal_path)
 
-    def test_stale_seal_after_candidate_change_is_rejected(self):
+    def test_stale_seal_after_candidate_or_replay_change_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, candidate, seal_path = self.build_paths(Path(td))
             supplied = self.good_seal()
             fresh = self.good_seal()
-            fresh["producer_module_sha256"] = "a" * 64
+            fresh["producer_replay_attestation_sha256"] = "a" * 64
             fresh["candidate_files_sha256"] = dict(fresh["candidate_files_sha256"])
-            fresh["candidate_files_sha256"]["r7_runtime/r6_causal_producer.py"] = "a" * 64
+            fresh["candidate_files_sha256"]["R7_R1_R6_PRODUCER_REPLAY.json"] = "a" * 64
             seal_path.write_text(json.dumps(supplied), encoding="utf-8")
             with mock.patch(
                 "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
@@ -127,6 +139,23 @@ class FusedReleasePrecheckTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(FusedReleasePrecheckError, "SEAL_EXECUTION_UNLOCK_CLAIM"):
                     verify_fused_release_precheck(runtime, candidate, seal_path)
+
+    def test_replay_or_source_policy_claim_cannot_be_downgraded(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, candidate, seal_path = self.build_paths(Path(td))
+            for field, error in (
+                ("trusted_producer_replay_pass", "SEAL_TRUSTED_REPLAY_NOT_PASS"),
+                ("producer_source_policy_pass", "SEAL_SOURCE_POLICY_NOT_PASS"),
+            ):
+                seal = self.good_seal()
+                seal[field] = False
+                seal_path.write_text(json.dumps(seal), encoding="utf-8")
+                with mock.patch(
+                    "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
+                    return_value=self.baseline_integrity(),
+                ):
+                    with self.assertRaisesRegex(FusedReleasePrecheckError, error):
+                        verify_fused_release_precheck(runtime, candidate, seal_path)
 
     def test_holdout_or_retune_claim_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
