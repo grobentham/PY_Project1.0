@@ -1,0 +1,76 @@
+@echo off
+setlocal EnableExtensions
+cd /d "%~dp0"
+title XAU V16 R7-R1 Full Runtime Repair
+
+where py >nul 2>nul
+if %errorlevel%==0 (
+    set "PY=py -3"
+) else (
+    where python >nul 2>nul
+    if errorlevel 1 (
+        echo [BLOCKED] Python 3 was not found on PATH.
+        pause
+        exit /b 1
+    )
+    set "PY=python"
+)
+
+:MENU
+cls
+echo ============================================================
+echo XAU V16 R7-R1 - FULL RUNTIME REPAIR
+echo Frozen R6 policy integrity is verified at every R7-R1 start.
+echo Live-account execution is prohibited. Demo sending is locked.
+echo ============================================================
+echo.
+echo [1] Offline software + parent integrity status
+echo [2] MT5 account / quote / exposure status
+echo [3] Crash-recovery reconciliation
+echo [4] Preflight an R6-derived intent JSON - NO SEND
+echo [5] Submit an intent to DEMO - requires explicit unlock
+echo [6] Run preserved frozen R6 launcher
+echo [7] Exit
+echo.
+set /p CHOICE=Select: 
+
+if "%CHOICE%"=="1" (
+    %PY% -m r7_runtime.runtime --offline-status
+    goto PAUSEMENU
+)
+if "%CHOICE%"=="2" (
+    %PY% -m r7_runtime.runtime --status
+    goto PAUSEMENU
+)
+if "%CHOICE%"=="3" (
+    %PY% -m r7_runtime.runtime --recover
+    goto PAUSEMENU
+)
+if "%CHOICE%"=="4" (
+    set /p INTENT=Intent JSON path: 
+    %PY% -m r7_runtime.runtime --preflight-intent "%INTENT%"
+    goto PAUSEMENU
+)
+if "%CHOICE%"=="5" (
+    echo.
+    echo Demo order sending requires BOTH:
+    echo   1. R7_R1_RUNTIME_CONFIG.json: request_demo_execution = true
+    echo   2. Environment variable:
+    echo      XAU_R7_R1_ENABLE_DEMO_EXECUTION=YES_I_ACCEPT_DEMO_ONLY
+    echo.
+    set /p INTENT=Intent JSON path: 
+    %PY% -m r7_runtime.runtime --submit-intent "%INTENT%"
+    goto PAUSEMENU
+)
+if "%CHOICE%"=="6" (
+    %PY% -m r7_runtime.legacy_launcher
+    goto PAUSEMENU
+)
+if "%CHOICE%"=="7" exit /b 0
+
+echo [ERROR] Invalid selection.
+
+:PAUSEMENU
+echo.
+pause
+goto MENU
