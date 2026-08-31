@@ -178,7 +178,7 @@ class AuditStore:
             self.conn.execute("ROLLBACK")
 
     def verify_store_integrity(self) -> Dict[str, Any]:
-        """Fail closed if SQLite, audit history, or derived intent state disagree."""
+        """Fail closed if SQLite tables and append-only audit history disagree."""
         try:
             quick = self.conn.execute("PRAGMA quick_check").fetchall()
         except sqlite3.DatabaseError as exc:
@@ -228,23 +228,38 @@ class AuditStore:
                 raise StoreError("INTENT_PAYLOAD_LEDGER_MISMATCH:" + intent_id)
             if state != exp["state"]:
                 raise StoreError("INTENT_STATE_LEDGER_MISMATCH:" + intent_id)
-            if exp["broker_ticket"] is not None and broker_ticket != exp["broker_ticket"]:
+            # Exact equality is required. Injecting a ticket into an intent whose
+            # ledger never recorded one is persistence tampering too.
+            if broker_ticket != exp["broker_ticket"]:
                 raise StoreError("INTENT_BROKER_TICKET_LEDGER_MISMATCH:" + intent_id)
 
-        # Runtime state is not execution authority, but if a value has a matching
-        # latest RUNTIME_STATE_SET event, its current bytes must match that hash.
         latest_runtime_hash: Dict[str, str] = {}
         for event_type, payload_json in rows:
-            if event_type == "RUNTIME_STATE_SET":
-                event = json.loads(payload_json)
-                key, digest = event.get("key"), event.get("value_sha256")
-                if isinstance(key, str) and isinstance(digest, str):
-                    latest_runtime_hash[key] = digest
-        for key, value_json in self.conn.execute("SELECT key,value_json FROM runtime_state").fetchall():
-            if key in latest_runtime_hash and self._payload_hash(value_json) != latest_runtime_hash[key]:
+            if event_type != "RUNTIME_STATE_SET":
+                continue
+            event = json.loads(payload_json)
+            key, digest = event.get("key"), event.get("value_sha256")
+            if not isinstance(key, str) or not key or not isinstance(digest, str) or len(digest) != 64:
+                raise StoreError("RUNTIME_STATE_LEDGER_EVENT_INVALID")
+            latest_runtime_hash[key] = digest
+
+        actual_runtime_rows = self.conn.execute("SELECT key,value_json FROM runtime_state ORDER BY key").fetchall()
+        actual_runtime = {key: value_json for key, value_json in actual_runtime_rows}
+        # Runtime state controls the persistent manual-review pause. Therefore
+        # deletion of an audited row, or injection of an unaudited row, must be
+        # treated exactly like intent-table tampering.
+        if set(actual_runtime) != set(latest_runtime_hash):
+            raise StoreError("RUNTIME_STATE_LEDGER_KEY_SET_MISMATCH")
+        for key, digest in latest_runtime_hash.items():
+            if self._payload_hash(actual_runtime[key]) != digest:
                 raise StoreError("RUNTIME_STATE_LEDGER_MISMATCH:" + key)
 
-        return {"quick_check": "ok", "audit_chain": "PASS", "intent_count": len(actual_rows), "runtime_state_count": len(latest_runtime_hash)}
+        return {
+            "quick_check": "ok",
+            "audit_chain": "PASS",
+            "intent_count": len(actual_rows),
+            "runtime_state_count": len(actual_runtime_rows),
+        }
 
     def close(self) -> None:
         self.conn.close()
