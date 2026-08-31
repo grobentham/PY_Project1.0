@@ -15,7 +15,7 @@ class R6SourceProbeError(RuntimeError):
     pass
 
 
-PROBE_VERSION = "R7_R1_R6_SOURCE_PROBE_V1"
+PROBE_VERSION = "R7_R1_R6_SOURCE_PROBE_V2"
 
 _REQUIRED_SOURCE_FILES = (
     "v16r6/engine.py",
@@ -41,14 +41,28 @@ class FunctionSignature:
 
 
 @dataclass(frozen=True)
+class FunctionProbe:
+    signature: FunctionSignature
+    lineno: int
+    end_lineno: int
+    ast_sha256: str
+    normalized_source: str
+    calls: List[str]
+    referenced_names: List[str]
+    string_literals: List[str]
+    numeric_literals: List[float]
+
+
+@dataclass(frozen=True)
 class SourceFileProbe:
     relative_path: str
     sha256: str
     size_bytes: int
     imports: List[str]
-    functions: List[FunctionSignature]
+    functions: List[FunctionProbe]
     classes: List[str]
     assigned_names: List[str]
+    assigned_expressions: Dict[str, str]
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -81,6 +95,53 @@ def _function_signature(node: ast.AST) -> FunctionSignature:
     )
 
 
+def _call_name(node: ast.Call) -> Optional[str]:
+    fn = node.func
+    parts: List[str] = []
+    while isinstance(fn, ast.Attribute):
+        parts.append(fn.attr)
+        fn = fn.value
+    if isinstance(fn, ast.Name):
+        parts.append(fn.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _function_probe(node: ast.AST) -> FunctionProbe:
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        raise TypeError("function node required")
+    normalized = ast.unparse(node)
+    ast_dump = ast.dump(node, annotate_fields=True, include_attributes=False)
+    calls = set()
+    referenced = set()
+    string_literals = set()
+    numeric_literals = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            name = _call_name(child)
+            if name:
+                calls.add(name)
+        elif isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+            referenced.add(child.id)
+        elif isinstance(child, ast.Constant):
+            value = child.value
+            if isinstance(value, str):
+                string_literals.add(value)
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                numeric_literals.add(float(value))
+    return FunctionProbe(
+        signature=_function_signature(node),
+        lineno=int(getattr(node, "lineno", 0) or 0),
+        end_lineno=int(getattr(node, "end_lineno", 0) or 0),
+        ast_sha256=_sha256_bytes(ast_dump.encode("utf-8")),
+        normalized_source=normalized,
+        calls=sorted(calls),
+        referenced_names=sorted(referenced),
+        string_literals=sorted(string_literals),
+        numeric_literals=sorted(numeric_literals),
+    )
+
+
 def _assigned_names(tree: ast.Module) -> List[str]:
     names = set()
     for node in tree.body:
@@ -93,6 +154,18 @@ def _assigned_names(tree: ast.Module) -> List[str]:
             if isinstance(target, ast.Name):
                 names.add(target.id)
     return sorted(names)
+
+
+def _assigned_expressions(tree: ast.Module) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            out[node.targets[0].id] = ast.unparse(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            out[node.target.id] = ast.unparse(node.value)
+    return {key: out[key] for key in sorted(out)}
 
 
 def _imports(tree: ast.Module) -> List[str]:
@@ -123,7 +196,7 @@ def _probe_file(path: Path, relative_path: str) -> SourceFileProbe:
         raise R6SourceProbeError(f"R6_SOURCE_AST_PARSE_FAILED:{relative_path}:{exc}") from exc
 
     functions = [
-        _function_signature(node)
+        _function_probe(node)
         for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
@@ -136,6 +209,7 @@ def _probe_file(path: Path, relative_path: str) -> SourceFileProbe:
         functions=functions,
         classes=classes,
         assigned_names=_assigned_names(tree),
+        assigned_expressions=_assigned_expressions(tree),
     )
 
 
@@ -151,10 +225,12 @@ def _resolve_exact(root: Path, relative: str) -> Path:
 
 
 def probe_frozen_r6_source(root: Path) -> Dict:
-    """AST-map the protected frozen R5/R6 source without importing or executing it.
+    """AST-map protected frozen R5/R6 source without importing or executing it.
 
-    This deliberately reads source code only. It does not read trade outcomes,
-    validation ledgers, Final Holdout data, or market data.
+    The report contains semantically normalized function source and dependency
+    metadata derived by Python's AST parser. It reads only the three protected
+    Python source files and never opens market, outcome, validation, or Holdout
+    data.
     """
     root = Path(root).resolve()
     files: Dict[str, SourceFileProbe] = {}
@@ -163,7 +239,7 @@ def probe_frozen_r6_source(root: Path) -> Dict:
 
     missing_functions: Dict[str, List[str]] = {}
     for relative, required in _REQUIRED_FUNCTIONS.items():
-        actual = {f.name for f in files[relative].functions}
+        actual = {f.signature.name for f in files[relative].functions}
         missing = sorted(required - actual)
         if missing:
             missing_functions[relative] = missing
@@ -179,6 +255,7 @@ def probe_frozen_r6_source(root: Path) -> Dict:
         "probe_version": PROBE_VERSION,
         "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
         "source_only_probe": True,
+        "normalized_ast_source_included": True,
         "final_holdout_accessed": False,
         "strategy_executed": False,
         "strategy_retuned": False,
@@ -187,7 +264,14 @@ def probe_frozen_r6_source(root: Path) -> Dict:
         "files": {
             relative: {
                 **{k: v for k, v in asdict(probe).items() if k != "functions"},
-                "functions": [asdict(f) for f in probe.functions],
+                "functions": [
+                    {
+                        **{k: v for k, v in asdict(f).items() if k != "signature"},
+                        "signature": asdict(f.signature),
+                        "name": f.signature.name,
+                    }
+                    for f in probe.functions
+                ],
             }
             for relative, probe in files.items()
         },
