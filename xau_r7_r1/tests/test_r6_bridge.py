@@ -31,6 +31,9 @@ def payload(decision_id="bridge-1", **updates):
 class FakeResult:
     order = 123
     deal = 0
+    retcode = 10009
+    volume = 0.01
+    price = 3000.2
 
 
 class Gateway:
@@ -67,6 +70,9 @@ class Gateway:
     def order_send(self, request):
         self.send_calls += 1
         return FakeResult()
+
+    def order_send_state(self, result):
+        return "DONE"
 
     def find_intent_at_broker(self, intent_id):
         return self.after_match if self.send_calls else BrokerMatch(False)
