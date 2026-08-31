@@ -3,6 +3,7 @@ Set-StrictMode -Version Latest
 
 $CanonicalName = 'XAU_BOUNDED_RECOVERY_V16_PROFIT_TRANSFER_R6_RESEARCH_FROZEN.zip'
 $CanonicalSha256 = '8b54c6bc53c38c34b8e88d39893687e8ba75b063897c8b097aaedc68d614fca7'
+$RequiredProbeVersion = 'R7_R1_R6_SOURCE_PROBE_V2'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ParentZip = Join-Path $Here $CanonicalName
 $Output = Join-Path $Here 'R7_R1_R6_PRODUCER_SOURCE'
@@ -55,12 +56,16 @@ try {
     if (!(Test-Path -LiteralPath $ProbePath -PathType Leaf)) { Fail 'source probe missing' }
 
     $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+    $probe = Get-Content -LiteralPath $ProbePath -Raw | ConvertFrom-Json
     if ($manifest.canonical_parent_zip_sha256 -ne $CanonicalSha256) { Fail 'bundle parent hash mismatch' }
     if ($manifest.source_only_bundle -ne $true) { Fail 'bundle is not source-only' }
     if ($manifest.strategy_executed -ne $false) { Fail 'bundle claims strategy execution' }
     if ($manifest.strategy_retuned -ne $false) { Fail 'bundle claims strategy retuning' }
     if ($manifest.final_holdout_accessed -ne $false) { Fail 'bundle claims Final Holdout access' }
     if ($manifest.producer_admitted -ne $false) { Fail 'source extraction may not admit producer' }
+    if ($probe.probe_version -ne $RequiredProbeVersion) { Fail ('stale or unexpected source probe version: ' + [string]$probe.probe_version) }
+    if ($probe.normalized_ast_source_included -ne $true) { Fail 'source probe did not include normalized AST implementation source' }
+    if ($probe.source_only_probe -ne $true -or $probe.strategy_executed -ne $false) { Fail 'source probe boundary invalid' }
 
     foreach ($relative in @('v16r6\engine.py','v16r5\engine.py','V16_R5_MAIN.py')) {
         if (!(Test-Path -LiteralPath (Join-Path $Output $relative) -PathType Leaf)) {
@@ -72,9 +77,10 @@ try {
     }
 
     Write-Host ''
-    Write-Host '[PASS] Canonical frozen R5/R6 producer source extracted safely.' -ForegroundColor Green
+    Write-Host '[PASS] Canonical frozen R5/R6 producer source extracted and deeply mapped.' -ForegroundColor Green
     Write-Host ('Source bundle: ' + $Output)
     Write-Host ('Manifest: ' + $ManifestPath)
+    Write-Host ('Implementation map: ' + $ProbePath)
     Write-Host 'Execution remains hard-locked; extraction alone does not admit a producer.' -ForegroundColor Yellow
 }
 finally {
