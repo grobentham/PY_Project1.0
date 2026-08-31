@@ -56,18 +56,15 @@ class OrderIntent:
     stop_price: float
     take_profit_price: Optional[float]
     source: str
-    # Adapter-generated intents carry the frozen ATR geometry so each broker
-    # preflight can rematerialize stop/target from the latest executable quote.
     frozen_atr_usd: Optional[float] = None
     frozen_stop_atr: Optional[float] = None
     frozen_target_atr: Optional[float] = None
     decision_fingerprint: Optional[str] = None
+    execution_authority: Optional[str] = None
 
     def canonical_payload(self) -> Dict[str, Any]:
         frozen = (self.frozen_atr_usd, self.frozen_stop_atr, self.frozen_target_atr)
         if all(v is not None for v in frozen):
-            # Absolute stop/target are transient renderings of the same frozen
-            # ATR plan and must not create a false idempotency collision.
             return {
                 "client_intent_id": self.client_intent_id,
                 "side": self.side,
@@ -78,6 +75,7 @@ class OrderIntent:
                 "frozen_stop_atr": self.frozen_stop_atr,
                 "frozen_target_atr": self.frozen_target_atr,
                 "decision_fingerprint": self.decision_fingerprint,
+                "execution_authority": self.execution_authority,
             }
         return asdict(self)
 
