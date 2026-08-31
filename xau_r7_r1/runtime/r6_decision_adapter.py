@@ -4,24 +4,16 @@ import hashlib
 import json
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional, Tuple
 
 from .constants import (
-    CANONICAL_R6_ZIP_SHA256,
-    MAX_CANONICAL_LOT,
-    RETIRED_SOURCE,
-    R6_COMPRESSION_GEOMETRY,
-    R6_DECISION_ID_MAX_LENGTH,
-    R6_DECISION_MAX_AGE_SECONDS,
-    R6_DECISION_MAX_FUTURE_SECONDS,
-    R6_DECISION_POLICY,
-    R6_DECISION_SCHEMA,
-    R6_INTENT_ID_HASH_HEX,
-    R6_LTM_GEOMETRY,
-    R6_SOURCE_FAMILY,
-    R6_SOURCE_PRIORITY,
+    CANONICAL_R6_ZIP_SHA256, MAX_CANONICAL_LOT, RETIRED_SOURCE,
+    R6_COMPRESSION_GEOMETRY, R6_DECISION_ID_MAX_LENGTH,
+    R6_DECISION_MAX_AGE_SECONDS, R6_DECISION_MAX_FUTURE_SECONDS,
+    R6_DECISION_POLICY, R6_DECISION_SCHEMA, R6_INTENT_ID_HASH_HEX,
+    R6_LTM_GEOMETRY, R6_SOURCE_FAMILY, R6_SOURCE_PRIORITY,
 )
 from .models import OrderIntent, SymbolSnapshot
 
@@ -56,14 +48,14 @@ class AdaptedDecision:
     decision: AdmittedR6Decision
     intent: OrderIntent
     raw_sha256: str
+    decision_fingerprint: str
     derived_entry_price: float
 
 
 _REQUIRED_FIELDS = {
-    "schema", "policy", "parent_zip_sha256", "decision_id",
-    "signal_bar_ms", "emitted_at_ms", "side", "source", "priority",
-    "family", "signal_type", "atr_usd", "stop_atr", "target_atr",
-    "geometry_used", "lot_size", "admitted",
+    "schema", "policy", "parent_zip_sha256", "decision_id", "signal_bar_ms",
+    "emitted_at_ms", "side", "source", "priority", "family", "signal_type",
+    "atr_usd", "stop_atr", "target_atr", "geometry_used", "lot_size", "admitted",
 }
 
 
@@ -117,12 +109,13 @@ def client_intent_id(decision_id: str) -> str:
     return "r6_" + digest
 
 
-class R6DecisionAdapter:
-    """Translate an already-admitted frozen R6 decision into an OrderIntent.
+def decision_fingerprint(decision: AdmittedR6Decision) -> str:
+    body = json.dumps(asdict(decision), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
-    This class never selects signals, models, families, geometry, or size. Those
-    choices must already have been made by the frozen R6 decision authority.
-    """
+
+class R6DecisionAdapter:
+    """Verify an already-admitted frozen R6 decision and translate it to broker geometry."""
 
     def parse(self, raw_bytes: bytes, *, now_ms: Optional[int] = None) -> Tuple[AdmittedR6Decision, str]:
         if not isinstance(raw_bytes, (bytes, bytearray)) or not raw_bytes:
@@ -190,10 +183,9 @@ class R6DecisionAdapter:
         if priority != R6_SOURCE_PRIORITY[source]:
             raise DecisionAdapterError("DECISION_SOURCE_PRIORITY_MISMATCH")
 
-        if source in R6_SOURCE_FAMILY:
-            if family != R6_SOURCE_FAMILY[source]:
-                raise DecisionAdapterError("DECISION_SOURCE_FAMILY_MISMATCH")
-        elif source == "CORE":
+        if source in R6_SOURCE_FAMILY and family != R6_SOURCE_FAMILY[source]:
+            raise DecisionAdapterError("DECISION_SOURCE_FAMILY_MISMATCH")
+        if source == "CORE":
             if family not in {"", "BASE"}:
                 raise DecisionAdapterError("DECISION_CORE_FAMILY_INVALID")
             if not signal_type:
@@ -211,11 +203,8 @@ class R6DecisionAdapter:
                 raise DecisionAdapterError("DECISION_COMPRESSION_GEOMETRY_MISMATCH")
             if signal_type not in {"", "COMPRESSION_EXPANSION_BREAKOUT"}:
                 raise DecisionAdapterError("DECISION_COMPRESSION_SIGNAL_TYPE_MISMATCH")
-        elif source == "CORE":
-            if geometry != "PRIMARY":
-                raise DecisionAdapterError("DECISION_CORE_GEOMETRY_MUST_BE_PRIMARY")
-            # CORE geometry is signal-specific in protected validation. Carry the
-            # frozen selected pair; never infer a replacement pair here.
+        elif source == "CORE" and geometry != "PRIMARY":
+            raise DecisionAdapterError("DECISION_CORE_GEOMETRY_MUST_BE_PRIMARY")
 
         now = int(time.time() * 1000) if now_ms is None else _strict_int(now_ms, "DECISION_NOW_MS")
         age_ms = now - emitted_at_ms
@@ -240,7 +229,6 @@ class R6DecisionAdapter:
         entry = float(symbol.ask if decision.side == 1 else symbol.bid)
         if not math.isfinite(entry) or entry <= 0:
             raise DecisionAdapterError("BROKER_ENTRY_PRICE_INVALID")
-
         if decision.side == 1:
             stop = entry - decision.stop_atr * decision.atr_usd
             target = entry + decision.target_atr * decision.atr_usd
@@ -255,16 +243,12 @@ class R6DecisionAdapter:
             raise DecisionAdapterError("DERIVED_LONG_GEOMETRY_INVALID")
         if side == "SELL" and not (target < entry < stop):
             raise DecisionAdapterError("DERIVED_SHORT_GEOMETRY_INVALID")
-
+        fingerprint = decision_fingerprint(decision)
         intent = OrderIntent(
-            client_intent_id=client_intent_id(decision.decision_id),
-            side=side,
-            lot=decision.lot_size,
-            stop_price=stop,
-            take_profit_price=target,
-            source=decision.source,
-            frozen_atr_usd=decision.atr_usd,
-            frozen_stop_atr=decision.stop_atr,
-            frozen_target_atr=decision.target_atr,
+            client_intent_id=client_intent_id(decision.decision_id), side=side,
+            lot=decision.lot_size, stop_price=stop, take_profit_price=target,
+            source=decision.source, frozen_atr_usd=decision.atr_usd,
+            frozen_stop_atr=decision.stop_atr, frozen_target_atr=decision.target_atr,
+            decision_fingerprint=fingerprint,
         )
-        return AdaptedDecision(decision, intent, raw_sha256, entry)
+        return AdaptedDecision(decision, intent, raw_sha256, fingerprint, entry)
