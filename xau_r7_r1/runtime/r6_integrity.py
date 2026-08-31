@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Dict, Iterable
+from typing import Dict, Iterable, Optional
 
 from .constants import PROTECTED_R6_PATH_SUFFIXES
 
@@ -36,7 +36,7 @@ def collect_protected_hashes(root: Path) -> Dict[str, str]:
     return out
 
 
-def verify_runtime_parent_integrity(root: Path, manifest_path: Path | None = None) -> Dict[str, str]:
+def verify_runtime_parent_integrity(root: Path, manifest_path: Optional[Path] = None) -> Dict[str, str]:
     root = Path(root).resolve()
     manifest_path = manifest_path or root / "R7_R1_PARENT_INTEGRITY.json"
     if not manifest_path.exists():
