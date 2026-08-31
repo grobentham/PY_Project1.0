@@ -77,7 +77,11 @@ if "%CHOICE%"=="7" (
     %PY% -m r7_runtime.runtime --clear-r6-pause --resume-ack "%ACK%"
     goto PAUSEMENU
 )
-if "%CHOICE%"=="8" goto PRODUCER_MENU
+if "%CHOICE%"=="8" (
+    call :VERIFY_PRODUCER_TOOLKIT
+    if errorlevel 1 goto PAUSEMENU
+    goto PRODUCER_MENU
+)
 if "%CHOICE%"=="0" exit /b 0
 
 echo [ERROR] Invalid selection.
@@ -89,6 +93,7 @@ echo ============================================================
 echo R6 PRODUCER CERTIFICATION TOOLS - NO TRADING AUTHORITY
 echo These tools cannot flip CAUSAL_R6_PRODUCER_READY and cannot
 echo create an execution-enabled package.
+echo Package/operator hashes are rechecked immediately before each tool.
 echo ============================================================
 echo.
 echo [1] Probe canonical frozen R6 source implementation - SOURCE ONLY
@@ -100,36 +105,28 @@ echo.
 set /p PCHOICE=Select: 
 
 if "%PCHOICE%"=="1" (
-    if not exist "PROBE_CANONICAL_R6_SOURCE.ps1" (
-        echo [BLOCKED] Hash-covered probe tool is missing.
-        goto PRODUCER_PAUSE
-    )
+    call :VERIFY_PRODUCER_TOOLKIT
+    if errorlevel 1 goto PRODUCER_PAUSE
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\PROBE_CANONICAL_R6_SOURCE.ps1"
     goto PRODUCER_PAUSE
 )
 if "%PCHOICE%"=="2" (
-    if not exist "EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1" (
-        echo [BLOCKED] Hash-covered source extractor is missing.
-        goto PRODUCER_PAUSE
-    )
+    call :VERIFY_PRODUCER_TOOLKIT
+    if errorlevel 1 goto PRODUCER_PAUSE
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1"
     goto PRODUCER_PAUSE
 )
 if "%PCHOICE%"=="3" (
-    if not exist "SEAL_R6_PRODUCER_CANDIDATE.ps1" (
-        echo [BLOCKED] Hash-covered candidate seal tool is missing.
-        goto PRODUCER_PAUSE
-    )
+    call :VERIFY_PRODUCER_TOOLKIT
+    if errorlevel 1 goto PRODUCER_PAUSE
     echo Candidate must already contain the exact producer + complete parity/admission evidence.
     set /p CANDIDATE=Producer candidate folder path: 
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\SEAL_R6_PRODUCER_CANDIDATE.ps1" -RuntimeRoot "%CD%" -CandidateRoot "%CANDIDATE%"
     goto PRODUCER_PAUSE
 )
 if "%PCHOICE%"=="4" (
-    if not exist "PRECHECK_R6_FUSED_RELEASE.ps1" (
-        echo [BLOCKED] Hash-covered fused-release precheck tool is missing.
-        goto PRODUCER_PAUSE
-    )
+    call :VERIFY_PRODUCER_TOOLKIT
+    if errorlevel 1 goto PRODUCER_PAUSE
     echo This verifies eligibility only. It does NOT fuse code or unlock execution.
     set /p CANDIDATE=Sealed producer candidate folder path: 
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\PRECHECK_R6_FUSED_RELEASE.ps1" -RuntimeRoot "%CD%" -CandidateRoot "%CANDIDATE%"
@@ -143,6 +140,15 @@ echo [ERROR] Invalid producer-tool selection.
 echo.
 pause
 goto PRODUCER_MENU
+
+:VERIFY_PRODUCER_TOOLKIT
+%PY% -m r7_runtime.runtime --offline-status >nul 2>nul
+if errorlevel 1 (
+    echo [BLOCKED] Package/operator integrity failed. Producer tools will not run.
+    %PY% -m r7_runtime.runtime --offline-status
+    exit /b 1
+)
+exit /b 0
 
 :PAUSEMENU
 echo.
