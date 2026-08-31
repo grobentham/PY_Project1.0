@@ -15,14 +15,15 @@ from .constants import (
 )
 from .r6_integrity import sha256_file
 from .r6_producer_admission import PARITY_SCHEMA
+from .r6_producer_replay import ProducerReplayError, verify_replay_evidence
 
 
 class ProducerParityError(RuntimeError):
     pass
 
 
-PARITY_TOOL_VERSION = "R7_R1_R6_PRODUCER_PARITY_TOOL_V2"
-ISOLATION_SCHEMA = "V16_R6_CAUSAL_FIXTURE_ISOLATION_V1"
+PARITY_TOOL_VERSION = "R7_R1_R6_PRODUCER_PARITY_TOOL_V3"
+ISOLATION_SCHEMA = "V16_R6_CAUSAL_FIXTURE_ISOLATION_V2"
 
 _RECORD_FIELDS = {"fixture_id", "available_through_ms", "decision"}
 _DECISION_FIELDS = {
@@ -158,6 +159,8 @@ def _validate_isolation(
     *,
     reference_path: Path,
     producer_path: Path,
+    fixture_path: Path,
+    replay_attestation_path: Path,
     fixture_count: int,
 ) -> Dict[str, Any]:
     data = _load_json(isolation_path, "PARITY_ISOLATION")
@@ -169,6 +172,10 @@ def _validate_isolation(
         raise ProducerParityError("PARITY_ISOLATION_REFERENCE_HASH_MISMATCH")
     if data.get("producer_stream_sha256") != sha256_file(producer_path):
         raise ProducerParityError("PARITY_ISOLATION_PRODUCER_HASH_MISMATCH")
+    if data.get("fixture_corpus_sha256") != sha256_file(fixture_path):
+        raise ProducerParityError("PARITY_ISOLATION_FIXTURE_HASH_MISMATCH")
+    if data.get("producer_replay_attestation_sha256") != sha256_file(replay_attestation_path):
+        raise ProducerParityError("PARITY_ISOLATION_REPLAY_HASH_MISMATCH")
     if _strict_int(data.get("fixture_count"), "PARITY_ISOLATION_FIXTURE_COUNT") != fixture_count:
         raise ProducerParityError("PARITY_ISOLATION_FIXTURE_COUNT_MISMATCH")
     required_false = (
@@ -180,8 +187,9 @@ def _validate_isolation(
     for key in required_false:
         if data.get(key) is not False:
             raise ProducerParityError("PARITY_ISOLATION_GUARD_FAILED:" + key)
-    if data.get("causal_prefix_fixture_generation") is not True:
-        raise ProducerParityError("PARITY_ISOLATION_CAUSAL_PREFIX_NOT_PROVEN")
+    for key in ("causal_prefix_fixture_generation", "trusted_producer_replay", "producer_source_policy_pass"):
+        if data.get(key) is not True:
+            raise ProducerParityError("PARITY_ISOLATION_GUARD_FAILED:" + key)
     return data
 
 
@@ -189,6 +197,8 @@ def build_parity_report(
     reference_path: Path,
     producer_stream_path: Path,
     *,
+    fixture_path: Path,
+    replay_attestation_path: Path,
     isolation_path: Path,
     source_probe_path: Path,
     source_bundle_manifest_path: Path,
@@ -197,15 +207,30 @@ def build_parity_report(
 ) -> Dict[str, Any]:
     reference_path = Path(reference_path).resolve()
     producer_stream_path = Path(producer_stream_path).resolve()
+    fixture_path = Path(fixture_path).resolve()
+    replay_attestation_path = Path(replay_attestation_path).resolve()
     source_probe_path = Path(source_probe_path).resolve()
     source_bundle_manifest_path = Path(source_bundle_manifest_path).resolve()
     producer_module_path = Path(producer_module_path).resolve()
-    if not source_probe_path.is_file():
-        raise ProducerParityError("SOURCE_PROBE_MISSING")
-    if not source_bundle_manifest_path.is_file():
-        raise ProducerParityError("SOURCE_BUNDLE_MANIFEST_MISSING")
-    if not producer_module_path.is_file():
-        raise ProducerParityError("PRODUCER_MODULE_MISSING")
+    for required, label in (
+        (source_probe_path, "SOURCE_PROBE_MISSING"),
+        (source_bundle_manifest_path, "SOURCE_BUNDLE_MANIFEST_MISSING"),
+        (producer_module_path, "PRODUCER_MODULE_MISSING"),
+        (fixture_path, "PRODUCER_FIXTURE_CORPUS_MISSING"),
+        (replay_attestation_path, "PRODUCER_REPLAY_ATTESTATION_MISSING"),
+    ):
+        if not required.is_file():
+            raise ProducerParityError(label)
+
+    try:
+        replay = verify_replay_evidence(
+            fixture_path,
+            producer_module_path,
+            producer_stream_path,
+            replay_attestation_path,
+        )
+    except ProducerReplayError as exc:
+        raise ProducerParityError("PRODUCER_TRUSTED_REPLAY_FAILED:" + str(exc)) from exc
 
     reference = load_stream(reference_path, "REFERENCE")
     producer = load_stream(producer_stream_path, "PRODUCER")
@@ -216,10 +241,14 @@ def build_parity_report(
             "PARITY_FIXTURE_SET_MISMATCH:missing=" + ",".join(missing) + ";extra=" + ",".join(extra)
         )
     fixture_ids = sorted(reference)
+    if replay.get("fixture_count") != len(fixture_ids):
+        raise ProducerParityError("PRODUCER_REPLAY_FIXTURE_COUNT_MISMATCH")
     _validate_isolation(
         isolation_path,
         reference_path=reference_path,
         producer_path=producer_stream_path,
+        fixture_path=fixture_path,
+        replay_attestation_path=replay_attestation_path,
         fixture_count=len(fixture_ids),
     )
 
@@ -291,11 +320,15 @@ def build_parity_report(
         "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
         "source_probe_sha256": sha256_file(source_probe_path),
         "source_bundle_manifest_sha256": sha256_file(source_bundle_manifest_path),
+        "fixture_corpus_sha256": sha256_file(fixture_path),
+        "producer_replay_attestation_sha256": sha256_file(replay_attestation_path),
         "producer_module": producer_module_relative.replace("\\", "/"),
         "producer_module_sha256": sha256_file(producer_module_path),
         "reference_stream_sha256": sha256_file(reference_path),
         "producer_stream_sha256": sha256_file(producer_stream_path),
         "isolation_manifest_sha256": sha256_file(isolation_path),
+        "trusted_producer_replay_pass": True,
+        "producer_source_policy_pass": True,
         "parity_pass": parity_pass,
         "causal_prefix_only": lookahead_violations == 0,
         "signal_selection_parity": selection_ok,
@@ -321,6 +354,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build hash-bound causal R6 producer parity evidence")
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--producer-stream", type=Path, required=True)
+    parser.add_argument("--fixtures", type=Path, required=True)
+    parser.add_argument("--replay-attestation", type=Path, required=True)
     parser.add_argument("--isolation", type=Path, required=True)
     parser.add_argument("--source-probe", type=Path, required=True)
     parser.add_argument("--source-bundle-manifest", type=Path, required=True)
@@ -331,6 +366,8 @@ def main() -> None:
     report = build_parity_report(
         args.reference,
         args.producer_stream,
+        fixture_path=args.fixtures,
+        replay_attestation_path=args.replay_attestation,
         isolation_path=args.isolation,
         source_probe_path=args.source_probe,
         source_bundle_manifest_path=args.source_bundle_manifest,
