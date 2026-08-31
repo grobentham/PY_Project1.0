@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Any, Dict
 
 from .audit_store import AuditStore
-from .constants import EXECUTION_UNLOCK_ENV, EXECUTION_UNLOCK_VALUE, HARD_MAX_SPREAD_USD, HARD_MAX_TICK_AGE_SECONDS, VERSION
+from .constants import (
+    EXECUTION_UNLOCK_ENV, EXECUTION_UNLOCK_VALUE, HARD_MAX_SPREAD_USD,
+    HARD_MAX_TICK_AGE_SECONDS, R6_BRIDGE_PAUSE_STATE_KEY, VERSION,
+)
 from .execution import ExecutionEngine
 from .instance_lock import SingleInstanceLock
 from .models import OrderIntent
@@ -86,12 +89,16 @@ def load_intent(path: Path) -> OrderIntent:
     return OrderIntent(raw["client_intent_id"], raw["side"], lot, stop, target, raw["source"])
 
 
+def _bridge_paused(store: AuditStore) -> bool:
+    return bool(store.get_runtime_state(R6_BRIDGE_PAUSE_STATE_KEY, False)) or (BRIDGE_ROOT / "PAUSED_MANUAL_REVIEW").exists()
+
+
 def offline_status(store: AuditStore, package_integrity: Dict[str, Any], store_integrity: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
-    return {"version": VERSION, "package_integrity": "PASS", "integrity": package_integrity, "state_integrity": store_integrity, "demo_execution_requested": cfg["request_demo_execution"], "execution_unlocked": demo_execution_enabled(cfg), "r6_bridge_root": str(BRIDGE_ROOT), "r6_bridge_paused": bool(store.get_runtime_state("r6_bridge_manual_review_pause", False)) or (BRIDGE_ROOT / "PAUSED_MANUAL_REVIEW").exists(), "final_holdout_accessed": False}
+    return {"version": VERSION, "package_integrity": "PASS", "integrity": package_integrity, "state_integrity": store_integrity, "demo_execution_requested": cfg["request_demo_execution"], "execution_unlocked": demo_execution_enabled(cfg), "r6_bridge_root": str(BRIDGE_ROOT), "r6_bridge_paused": _bridge_paused(store), "final_holdout_accessed": False}
 
 
 def connected_status(store: AuditStore, gateway: MT5Gateway, cfg: Dict[str, Any], package_integrity: Dict[str, Any], store_integrity: Dict[str, Any]) -> Dict[str, Any]:
-    return {"version": VERSION, "package_integrity": "PASS", "integrity": package_integrity, "state_integrity": store_integrity, "execution_unlocked": demo_execution_enabled(cfg), "account": gateway.account_snapshot().__dict__, "symbol": gateway.symbol_snapshot().__dict__, "exposure": gateway.exposure_snapshot().__dict__, "r6_bridge_root": str(BRIDGE_ROOT), "r6_bridge_paused": bool(store.get_runtime_state("r6_bridge_manual_review_pause", False)) or (BRIDGE_ROOT / "PAUSED_MANUAL_REVIEW").exists()}
+    return {"version": VERSION, "package_integrity": "PASS", "integrity": package_integrity, "state_integrity": store_integrity, "execution_unlocked": demo_execution_enabled(cfg), "account": gateway.account_snapshot().__dict__, "symbol": gateway.symbol_snapshot().__dict__, "exposure": gateway.exposure_snapshot().__dict__, "r6_bridge_root": str(BRIDGE_ROOT), "r6_bridge_paused": _bridge_paused(store)}
 
 
 def main() -> None:
@@ -105,6 +112,8 @@ def main() -> None:
     group.add_argument("--process-r6-decision", type=Path)
     group.add_argument("--drain-r6-inbox", action="store_true")
     group.add_argument("--run-r6-inbox", action="store_true")
+    group.add_argument("--clear-r6-pause", action="store_true")
+    parser.add_argument("--resume-ack", default="")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -114,8 +123,6 @@ def main() -> None:
         store = AuditStore(DB_PATH)
         gateway = None
         try:
-            # Persistent state is execution authority for idempotency/recovery.
-            # It must agree with its own append-only audit ledger before any MT5 call.
             store_integrity = store.verify_store_integrity()
             if args.offline_status:
                 print(json.dumps(offline_status(store, package_integrity, store_integrity, cfg), indent=2, sort_keys=True))
@@ -141,6 +148,9 @@ def main() -> None:
                 return
 
             bridge = R6InboxProcessor(BRIDGE_ROOT, store, gateway, execution_enabled=execution_enabled)
+            if args.clear_r6_pause:
+                print(json.dumps(bridge.clear_pause(args.resume_ack), indent=2, sort_keys=True))
+                return
             if args.process_r6_decision:
                 print(json.dumps(bridge.process_path(args.process_r6_decision), indent=2, sort_keys=True))
                 return
