@@ -40,34 +40,37 @@ class ProducerReplayTests(unittest.TestCase):
             self.assertTrue(stream.endswith(b"\n"))
             self.assertTrue(report["deterministic_double_run"])
             self.assertTrue(report["source_policy_pass"])
+            self.assertFalse(report["imports_allowed"])
+            self.assertFalse(report["dunder_access_allowed"])
             self.assertEqual(report["producer_input_mutation_count"], 0)
 
-    def test_filesystem_import_is_forbidden(self):
+    def test_any_import_is_forbidden(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            module = self.write_module(root, 'import os\ndef produce(prefix):\n    return prefix["decision"]\n')
-            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_IMPORT_FORBIDDEN"):
-                verify_producer_source_policy(module)
-
-    def test_aliasing_pandas_io_attribute_is_forbidden(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            module = self.write_module(root, 'import pandas as pd\ndef produce(prefix):\n    reader = pd.read_csv\n    return prefix["decision"]\n')
-            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_IO_ATTRIBUTE_FORBIDDEN"):
-                verify_producer_source_policy(module)
-
-    def test_from_import_io_function_is_forbidden(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            module = self.write_module(root, 'from pandas import read_csv\ndef produce(prefix):\n    return prefix["decision"]\n')
-            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_IMPORT_SYMBOL_FORBIDDEN"):
-                verify_producer_source_policy(module)
+            for source in (
+                'import os\ndef produce(prefix):\n    return prefix["decision"]\n',
+                'import pandas as pd\ndef produce(prefix):\n    return prefix["decision"]\n',
+                'from math import sqrt\ndef produce(prefix):\n    return prefix["decision"]\n',
+            ):
+                module = self.write_module(root, source)
+                with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_IMPORT_FORBIDDEN"):
+                    verify_producer_source_policy(module)
 
     def test_dunder_attribute_escape_is_forbidden(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            module = self.write_module(root, 'import pandas as pd\ndef produce(prefix):\n    x = pd.__dict__\n    return prefix["decision"]\n')
+            module = self.write_module(root, 'def produce(prefix):\n    x = prefix.__class__\n    return None\n')
             with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_DUNDER_ATTRIBUTE_FORBIDDEN"):
+                verify_producer_source_policy(module)
+
+    def test_class_and_global_state_constructs_are_forbidden(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            module = self.write_module(root, 'class X:\n    pass\ndef produce(prefix):\n    return None\n')
+            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_TOP_LEVEL_EXECUTION_FORBIDDEN|PRODUCER_STATEFUL_CONSTRUCT_FORBIDDEN"):
+                verify_producer_source_policy(module)
+            module = self.write_module(root, 'COUNTER = 0\ndef produce(prefix):\n    global COUNTER\n    return None\n')
+            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_STATEFUL_CONSTRUCT_FORBIDDEN"):
                 verify_producer_source_policy(module)
 
     def test_outcome_labelled_fixture_input_is_forbidden(self):
@@ -87,10 +90,17 @@ class ProducerReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ProducerReplayError, "FIXTURE_TIMESTAMP_AFTER_PREFIX"):
                 replay_producer(fixtures, module)
 
-    def test_nondeterministic_producer_is_rejected(self):
+    def test_nondeterministic_mutable_default_state_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            module = self.write_module(root, 'COUNTER = 0\ndef produce(prefix):\n    global COUNTER\n    COUNTER += 1\n    return {"n": COUNTER}\n')
+            module = self.write_module(
+                root,
+                'def helper(state=[0]):\n'
+                '    state[0] += 1\n'
+                '    return state[0]\n'
+                'def produce(prefix):\n'
+                '    return {"n": helper()}\n',
+            )
             fixtures = self.write_fixture(root)
             with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_NONDETERMINISTIC"):
                 replay_producer(fixtures, module)
@@ -109,6 +119,14 @@ class ProducerReplayTests(unittest.TestCase):
             module = self.write_module(root, 'NAME = "final_holdout.csv"\ndef produce(prefix):\n    return None\n')
             with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_PROHIBITED_DATA_REFERENCE"):
                 verify_producer_source_policy(module)
+
+    def test_non_whitelisted_builtin_is_unavailable_at_replay(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            module = self.write_module(root, 'def produce(prefix):\n    return {"x": id(prefix)}\n')
+            fixtures = self.write_fixture(root)
+            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_EXECUTION_FAILED:fx:NameError"):
+                replay_producer(fixtures, module)
 
 
 if __name__ == "__main__":
