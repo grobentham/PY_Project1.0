@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional, Tuple
 
 from .constants import CANONICAL_R6_ZIP_SHA256, RETIRED_SOURCE, R6_SOURCE_PRIORITY
 from .r6_integrity import sha256_file
+from .r6_source_bundle import BUNDLE_VERSION
 from .r6_source_probe import PROBE_VERSION
 
 
@@ -13,9 +14,9 @@ class ProducerAdmissionError(RuntimeError):
     pass
 
 
-ADMISSION_VERSION = "R7_R1_R6_PRODUCER_ADMISSION_V2"
+ADMISSION_VERSION = "R7_R1_R6_PRODUCER_ADMISSION_V3"
 PARITY_SCHEMA = "V16_R6_CAUSAL_PRODUCER_PARITY_V1"
-EXPECTED_PARITY_TOOL_VERSION = "R7_R1_R6_PRODUCER_PARITY_TOOL_V1"
+EXPECTED_PARITY_TOOL_VERSION = "R7_R1_R6_PRODUCER_PARITY_TOOL_V2"
 EXPECTED_ISOLATION_SCHEMA = "V16_R6_CAUSAL_FIXTURE_ISOLATION_V1"
 
 REQUIRED_SOURCE_FILES: Tuple[str, ...] = (
@@ -23,7 +24,6 @@ REQUIRED_SOURCE_FILES: Tuple[str, ...] = (
     "v16r5/engine.py",
     "V16_R5_MAIN.py",
 )
-
 REQUIRED_FROZEN_SOURCES = frozenset(R6_SOURCE_PRIORITY)
 
 
@@ -63,20 +63,154 @@ def _require_file_hash(path: Path, expected: Any, error: str) -> str:
     return digest
 
 
-def _parent_source_hashes(parent_manifest: Dict[str, Any]) -> Dict[str, str]:
-    protected = parent_manifest.get("protected_r6_hashes")
-    if not isinstance(protected, dict):
-        raise ProducerAdmissionError("PARENT_PROTECTED_HASHES_MISSING")
+def _normalized_hash_map(data: Any, label: str) -> Dict[str, str]:
+    if not isinstance(data, dict):
+        raise ProducerAdmissionError(label + "_MISSING")
     out: Dict[str, str] = {}
-    for relative in REQUIRED_SOURCE_FILES:
-        matches = [str(v) for k, v in protected.items() if str(k).replace("\\", "/") == relative]
-        if len(matches) != 1:
-            raise ProducerAdmissionError(f"PARENT_SOURCE_HASH_RESOLUTION_FAILED:{relative}:matches={len(matches)}")
-        digest = matches[0].lower()
+    for key, value in data.items():
+        relative = str(key).replace("\\", "/")
+        if relative in out:
+            raise ProducerAdmissionError(label + "_DUPLICATE_NORMALIZED_PATH:" + relative)
+        digest = str(value).lower()
         if len(digest) != 64:
-            raise ProducerAdmissionError(f"PARENT_SOURCE_HASH_INVALID:{relative}")
+            raise ProducerAdmissionError(label + "_INVALID_HASH:" + relative)
         out[relative] = digest
     return out
+
+
+def _parent_source_hashes(parent_manifest: Dict[str, Any]) -> Dict[str, str]:
+    protected = _normalized_hash_map(parent_manifest.get("protected_r6_hashes"), "PARENT_PROTECTED_HASHES")
+    out: Dict[str, str] = {}
+    for relative in REQUIRED_SOURCE_FILES:
+        digest = protected.get(relative)
+        if digest is None:
+            raise ProducerAdmissionError("PARENT_SOURCE_HASH_RESOLUTION_FAILED:" + relative)
+        out[relative] = digest
+    return out
+
+
+def _validate_source_relative(relative: str) -> str:
+    normalized = str(relative).replace("\\", "/")
+    pure = PurePosixPath(normalized)
+    if (
+        not normalized
+        or pure.is_absolute()
+        or any(part in {"", ".", ".."} for part in pure.parts)
+        or (pure.parts and ":" in pure.parts[0])
+    ):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_PATH_INVALID:" + normalized)
+    if not normalized.lower().endswith(".py"):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_NON_PYTHON_FILE:" + normalized)
+    lowered = normalized.lower()
+    if lowered.startswith("research_consumed_validation/") or "final_holdout" in lowered:
+        raise ProducerAdmissionError("SOURCE_BUNDLE_PROHIBITED_PATH:" + normalized)
+    return normalized
+
+
+def verify_source_bundle(
+    root: Path,
+    *,
+    parent_manifest_path: Path,
+    source_probe_path: Path,
+    source_bundle_manifest_path: Path,
+) -> Dict[str, Any]:
+    root = Path(root).resolve()
+    parent = _load_json(parent_manifest_path, "PARENT_MANIFEST")
+    bundle = _load_json(source_bundle_manifest_path, "SOURCE_BUNDLE_MANIFEST")
+
+    if parent.get("canonical_parent_zip_sha256") != CANONICAL_R6_ZIP_SHA256:
+        raise ProducerAdmissionError("PARENT_CANONICAL_SHA_MISMATCH")
+    if parent.get("build_verified_parent_zip_sha256") != CANONICAL_R6_ZIP_SHA256:
+        raise ProducerAdmissionError("PARENT_BUILD_SHA_MISMATCH")
+    if bundle.get("bundle_version") != BUNDLE_VERSION:
+        raise ProducerAdmissionError("SOURCE_BUNDLE_VERSION_MISMATCH")
+    if bundle.get("canonical_parent_zip_sha256") != CANONICAL_R6_ZIP_SHA256:
+        raise ProducerAdmissionError("SOURCE_BUNDLE_PARENT_SHA_MISMATCH")
+    _require_true(bundle, "source_only_bundle", "SOURCE_BUNDLE_NOT_SOURCE_ONLY")
+    _require_true(
+        bundle,
+        "static_local_python_dependency_closure_extracted",
+        "SOURCE_BUNDLE_DEPENDENCY_CLOSURE_NOT_PROVEN",
+    )
+    _require_true(bundle, "required_local_imports_resolved", "SOURCE_BUNDLE_LOCAL_IMPORTS_UNRESOLVED")
+    _require_false(bundle, "dynamic_imports_allowed", "SOURCE_BUNDLE_DYNAMIC_IMPORTS_ALLOWED")
+    _require_false(bundle, "strategy_executed", "SOURCE_BUNDLE_EXECUTED_STRATEGY")
+    _require_false(bundle, "strategy_retuned", "SOURCE_BUNDLE_RETUNED_STRATEGY")
+    _require_false(bundle, "final_holdout_accessed", "SOURCE_BUNDLE_HOLDOUT_BOUNDARY_BREACH")
+    _require_false(bundle, "producer_admitted", "SOURCE_BUNDLE_SELF_ADMISSION_FORBIDDEN")
+
+    if bundle.get("source_probe_file") != Path(source_probe_path).name:
+        raise ProducerAdmissionError("SOURCE_BUNDLE_PROBE_FILENAME_MISMATCH")
+    if bundle.get("source_probe_sha256") != sha256_file(source_probe_path):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_PROBE_HASH_MISMATCH")
+
+    dependency_count = _strict_nonnegative_int(bundle.get("dependency_count"), "SOURCE_BUNDLE_DEPENDENCY_COUNT")
+    closure = bundle.get("dependency_closure_files")
+    files = bundle.get("files")
+    required = bundle.get("required_source_files")
+    if not isinstance(closure, list) or any(not isinstance(x, str) for x in closure):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_DEPENDENCY_CLOSURE_INVALID")
+    if not isinstance(files, dict):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_FILES_INVALID")
+    if not isinstance(required, list) or any(not isinstance(x, str) for x in required):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_REQUIRED_FILES_INVALID")
+    normalized_closure = [_validate_source_relative(x) for x in closure]
+    if len(set(normalized_closure)) != len(normalized_closure):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_DUPLICATE_DEPENDENCY_PATH")
+    normalized_files = {_validate_source_relative(k): v for k, v in files.items()}
+    if dependency_count <= 0 or dependency_count != len(normalized_closure) or dependency_count != len(normalized_files):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_DEPENDENCY_COUNT_MISMATCH")
+    if set(normalized_closure) != set(normalized_files):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_DEPENDENCY_FILESET_MISMATCH")
+    normalized_required = {_validate_source_relative(x) for x in required}
+    if normalized_required != set(REQUIRED_SOURCE_FILES):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_REQUIRED_ENTRY_SET_MISMATCH")
+    if not normalized_required.issubset(set(normalized_closure)):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_REQUIRED_ENTRY_MISSING_FROM_CLOSURE")
+
+    parent_tree = _normalized_hash_map(parent.get("parent_tree_sha256"), "PARENT_TREE_HASHES")
+    verified_files: Dict[str, str] = {}
+    for relative in normalized_closure:
+        entry = normalized_files[relative]
+        if not isinstance(entry, dict):
+            raise ProducerAdmissionError("SOURCE_BUNDLE_FILE_ENTRY_INVALID:" + relative)
+        digest = str(entry.get("sha256", "")).lower()
+        if len(digest) != 64:
+            raise ProducerAdmissionError("SOURCE_BUNDLE_FILE_HASH_INVALID:" + relative)
+        size = _strict_nonnegative_int(entry.get("size_bytes"), "SOURCE_BUNDLE_FILE_SIZE:" + relative)
+        actual = (root / relative).resolve()
+        try:
+            actual.relative_to(root)
+        except ValueError as exc:
+            raise ProducerAdmissionError("SOURCE_BUNDLE_FILE_PATH_ESCAPE:" + relative) from exc
+        if not actual.is_file():
+            raise ProducerAdmissionError("SOURCE_BUNDLE_FILE_MISSING:" + relative)
+        if actual.stat().st_size != size:
+            raise ProducerAdmissionError("SOURCE_BUNDLE_FILE_SIZE_MISMATCH:" + relative)
+        actual_hash = sha256_file(actual)
+        if actual_hash != digest:
+            raise ProducerAdmissionError("SOURCE_BUNDLE_FILE_HASH_MISMATCH:" + relative)
+        if parent_tree.get(relative) != digest:
+            raise ProducerAdmissionError("SOURCE_BUNDLE_NOT_CANONICAL_PARENT_BYTES:" + relative)
+        verified_files[relative] = digest
+
+    unresolved = bundle.get("unresolved_nonarchive_imports")
+    if not isinstance(unresolved, dict):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORTS_INVALID")
+    for relative, imports in unresolved.items():
+        normalized = _validate_source_relative(relative)
+        if normalized not in verified_files:
+            raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORT_SOURCE_UNKNOWN:" + normalized)
+        if not isinstance(imports, list) or any(not isinstance(x, str) or not x for x in imports):
+            raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORT_LIST_INVALID:" + normalized)
+
+    return {
+        "bundle_version": BUNDLE_VERSION,
+        "manifest_sha256": sha256_file(source_bundle_manifest_path),
+        "dependency_count": dependency_count,
+        "verified_files": verified_files,
+        "unresolved_nonarchive_imports": unresolved,
+    }
 
 
 def verify_source_probe(root: Path, *, parent_manifest_path: Path, source_probe_path: Path) -> Dict[str, str]:
@@ -93,6 +227,7 @@ def verify_source_probe(root: Path, *, parent_manifest_path: Path, source_probe_
     if probe.get("canonical_parent_zip_sha256") != CANONICAL_R6_ZIP_SHA256:
         raise ProducerAdmissionError("SOURCE_PROBE_PARENT_SHA_MISMATCH")
     _require_true(probe, "source_only_probe", "SOURCE_PROBE_NOT_SOURCE_ONLY")
+    _require_true(probe, "normalized_ast_source_included", "SOURCE_PROBE_IMPLEMENTATION_MAP_MISSING")
     _require_true(probe, "required_engine_contract_present", "SOURCE_PROBE_ENGINE_CONTRACT_MISSING")
     _require_false(probe, "final_holdout_accessed", "SOURCE_PROBE_HOLDOUT_BOUNDARY_BREACH")
     _require_false(probe, "strategy_executed", "SOURCE_PROBE_EXECUTED_STRATEGY")
@@ -122,6 +257,7 @@ def verify_parity_evidence(
     root: Path,
     *,
     source_probe_path: Path,
+    source_bundle_manifest_path: Path,
     parity_path: Path,
     reference_stream_path: Path,
     producer_stream_path: Path,
@@ -137,6 +273,8 @@ def verify_parity_evidence(
         raise ProducerAdmissionError("PRODUCER_PARITY_PARENT_SHA_MISMATCH")
     if parity.get("source_probe_sha256") != sha256_file(source_probe_path):
         raise ProducerAdmissionError("PRODUCER_PARITY_SOURCE_PROBE_HASH_MISMATCH")
+    if parity.get("source_bundle_manifest_sha256") != sha256_file(source_bundle_manifest_path):
+        raise ProducerAdmissionError("PRODUCER_PARITY_SOURCE_BUNDLE_HASH_MISMATCH")
 
     reference_hash = _require_file_hash(
         reference_stream_path, parity.get("reference_stream_sha256"), "PRODUCER_PARITY_REFERENCE_STREAM"
@@ -222,6 +360,7 @@ def verify_parity_evidence(
     return {
         "producer_module": producer_rel,
         "producer_module_sha256": expected_producer_hash,
+        "source_bundle_manifest_sha256": sha256_file(source_bundle_manifest_path),
         "reference_stream_sha256": reference_hash,
         "producer_stream_sha256": producer_stream_hash,
         "isolation_manifest_sha256": isolation_hash,
@@ -237,6 +376,7 @@ def verify_producer_admission(
     *,
     parent_manifest_path: Optional[Path] = None,
     source_probe_path: Optional[Path] = None,
+    source_bundle_manifest_path: Optional[Path] = None,
     parity_path: Optional[Path] = None,
     reference_stream_path: Optional[Path] = None,
     producer_stream_path: Optional[Path] = None,
@@ -245,11 +385,18 @@ def verify_producer_admission(
     root = Path(root).resolve()
     parent_manifest_path = parent_manifest_path or root / "R7_R1_PARENT_INTEGRITY.json"
     source_probe_path = source_probe_path or root / "R7_R1_R6_SOURCE_PROBE.json"
+    source_bundle_manifest_path = source_bundle_manifest_path or root / "R7_R1_R6_SOURCE_BUNDLE_MANIFEST.json"
     parity_path = parity_path or root / "R7_R1_R6_PRODUCER_PARITY.json"
     reference_stream_path = reference_stream_path or root / "R7_R1_R6_REFERENCE_STREAM.jsonl"
     producer_stream_path = producer_stream_path or root / "R7_R1_R6_PRODUCER_STREAM.jsonl"
     isolation_path = isolation_path or root / "R7_R1_R6_PARITY_ISOLATION.json"
 
+    bundle = verify_source_bundle(
+        root,
+        parent_manifest_path=parent_manifest_path,
+        source_probe_path=source_probe_path,
+        source_bundle_manifest_path=source_bundle_manifest_path,
+    )
     source_hashes = verify_source_probe(
         root,
         parent_manifest_path=parent_manifest_path,
@@ -258,6 +405,7 @@ def verify_producer_admission(
     parity = verify_parity_evidence(
         root,
         source_probe_path=source_probe_path,
+        source_bundle_manifest_path=source_bundle_manifest_path,
         parity_path=parity_path,
         reference_stream_path=reference_stream_path,
         producer_stream_path=producer_stream_path,
@@ -267,6 +415,7 @@ def verify_producer_admission(
         "admission_version": ADMISSION_VERSION,
         "ready": True,
         "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
+        "source_bundle": bundle,
         "source_hashes": source_hashes,
         "parity": parity,
         "final_holdout_accessed": False,
