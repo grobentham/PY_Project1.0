@@ -57,6 +57,19 @@ function Get-ProtectedHashes([string]$Root) {
     return $map
 }
 
+function Get-R7RuntimeCodeHashes([string]$Root) {
+    $map = [ordered]@{}
+    $runtimeRoot = Join-Path $Root 'r7_runtime'
+    Get-ChildItem -LiteralPath $runtimeRoot -Recurse -File -Filter '*.py' | Sort-Object FullName | ForEach-Object {
+        $rel = Get-Rel $Root $_.FullName
+        $map[$rel] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $launcher = Join-Path $Root 'START_XAU.bat'
+    if (!(Test-Path -LiteralPath $launcher -PathType Leaf)) { Fail 'R7-R1 START_XAU.bat missing' }
+    $map['START_XAU.bat'] = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant()
+    return $map
+}
+
 function Get-MapEntries($Expected) {
     if ($Expected -is [System.Collections.IDictionary]) {
         return @($Expected.GetEnumerator() | ForEach-Object {
@@ -69,6 +82,16 @@ function Get-MapEntries($Expected) {
         })
     }
     Fail 'expected hash map is neither IDictionary nor PSCustomObject'
+}
+
+function Verify-HashMap([string]$Root, $Expected, [string]$Label) {
+    foreach ($entry in (Get-MapEntries $Expected)) {
+        $rel = [string]$entry.Key
+        $path = Join-Path $Root ($rel.Replace('/','\'))
+        if (!(Test-Path -LiteralPath $path -PathType Leaf)) { Fail ($Label + ' file missing: ' + $rel) }
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne [string]$entry.Value) { Fail ($Label + ' hash mismatch: ' + $rel) }
+    }
 }
 
 function Verify-InheritedTree([string]$Root, $Expected) {
@@ -87,29 +110,19 @@ function Verify-InheritedTree([string]$Root, $Expected) {
 }
 
 function Find-Python {
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        return @{ Exe = 'py'; Prefix = @('-3') }
-    }
-    if (Get-Command python -ErrorAction SilentlyContinue) {
-        return @{ Exe = 'python'; Prefix = @() }
-    }
+    if (Get-Command py -ErrorAction SilentlyContinue) { return @{ Exe = 'py'; Prefix = @('-3') } }
+    if (Get-Command python -ErrorAction SilentlyContinue) { return @{ Exe = 'python'; Prefix = @() } }
     Fail 'Python 3 was not found on PATH'
 }
 
 function Invoke-Python($Python, [string[]]$Arguments) {
-    $allArgs = @()
-    $allArgs += @($Python.Prefix)
-    $allArgs += @($Arguments)
+    $allArgs = @(); $allArgs += @($Python.Prefix); $allArgs += @($Arguments)
     & $Python.Exe @allArgs
-    if ($LASTEXITCODE -ne 0) {
-        Fail ('Python command failed: ' + ($Arguments -join ' '))
-    }
+    if ($LASTEXITCODE -ne 0) { Fail ('Python command failed: ' + ($Arguments -join ' ')) }
 }
 
 function Invoke-PythonCapture($Python, [string[]]$Arguments) {
-    $allArgs = @()
-    $allArgs += @($Python.Prefix)
-    $allArgs += @($Arguments)
+    $allArgs = @(); $allArgs += @($Python.Prefix); $allArgs += @($Arguments)
     $output = & $Python.Exe @allArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
         Fail ('Python command failed: ' + ($Arguments -join ' ') + "`n" + ($output -join "`n"))
@@ -123,10 +136,7 @@ function Assert-PythonVersion($Python) {
     Write-Host ('Python: ' + [string]$out[-1])
 }
 
-if (!(Test-Path -LiteralPath $ParentZip -PathType Leaf)) {
-    Fail ("put {0} beside BUILD_R7_R1.ps1" -f $CanonicalName)
-}
-
+if (!(Test-Path -LiteralPath $ParentZip -PathType Leaf)) { Fail ("put {0} beside BUILD_R7_R1.ps1" -f $CanonicalName) }
 $parentHash = (Get-FileHash -LiteralPath $ParentZip -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($parentHash -ne $CanonicalSha256) {
     Fail ("canonical R6 SHA-256 mismatch. expected={0} actual={1}" -f $CanonicalSha256, $parentHash)
@@ -139,12 +149,9 @@ New-Item -ItemType Directory -Path $Verify -Force | Out-Null
 
 try {
     Expand-Archive -LiteralPath $ParentZip -DestinationPath $Extract -Force
-
     $parentTree = Get-TreeHashes $Extract
     $protected = Get-ProtectedHashes $Extract
-    if (!$parentTree.Contains('START_XAU.bat')) {
-        Fail 'canonical parent START_XAU.bat is missing'
-    }
+    if (!$parentTree.Contains('START_XAU.bat')) { Fail 'canonical parent START_XAU.bat is missing' }
     $originalLauncherHash = [string]$parentTree['START_XAU.bat']
 
     $RuntimeTarget = Join-Path $Extract 'r7_runtime'
@@ -154,29 +161,10 @@ try {
     New-Item -ItemType Directory -Path $TestsTarget -Force | Out-Null
     New-Item -ItemType Directory -Path $FrozenParent -Force | Out-Null
 
-    # Preserve the original launcher bytes as non-executable evidence before replacement.
     Copy-Item -LiteralPath (Join-Path $Extract 'START_XAU.bat') -Destination (Join-Path $FrozenParent 'START_XAU_R6_ORIGINAL.bat.txt') -Force
-
     Copy-Item -Path (Join-Path $Here 'runtime\*') -Destination $RuntimeTarget -Recurse -Force
     Copy-Item -Path (Join-Path $Here 'tests\*') -Destination $TestsTarget -Recurse -Force
     Copy-Item -LiteralPath (Join-Path $Here 'R7_R1_RUNTIME_CONFIG.json') -Destination (Join-Path $Extract 'R7_R1_RUNTIME_CONFIG.json') -Force
-
-    $manifest = [ordered]@{
-        version = 'V16_R7_R1_FULL_RUNTIME_REPAIR'
-        canonical_parent_zip = $CanonicalName
-        canonical_parent_zip_sha256 = $CanonicalSha256
-        build_verified_parent_zip_sha256 = $parentHash
-        parent_tree_sha256 = $parentTree
-        protected_r6_hashes = $protected
-        original_start_xau_sha256 = $originalLauncherHash
-        allowed_inherited_change = @('START_XAU.bat')
-        final_holdout_accessed = $false
-        strategy_retuned = $false
-        demo_only = $true
-        execution_enabled_by_default = $false
-    }
-    Write-Utf8NoBom (Join-Path $Extract 'R7_R1_PARENT_INTEGRITY.json') ($manifest | ConvertTo-Json -Depth 12)
-
     Copy-Item -LiteralPath (Join-Path $Here 'START_XAU_R7_R1.bat.template') -Destination (Join-Path $Extract 'START_XAU.bat') -Force
 
     Verify-InheritedTree $Extract $parentTree
@@ -187,9 +175,25 @@ try {
         }
     }
     $frozenLauncherHash = (Get-FileHash -LiteralPath (Join-Path $FrozenParent 'START_XAU_R6_ORIGINAL.bat.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($frozenLauncherHash -ne $originalLauncherHash) {
-        Fail 'preserved R6 launcher bytes do not match original launcher hash'
+    if ($frozenLauncherHash -ne $originalLauncherHash) { Fail 'preserved R6 launcher bytes do not match original launcher hash' }
+
+    $r7RuntimeHashes = Get-R7RuntimeCodeHashes $Extract
+    $manifest = [ordered]@{
+        version = 'V16_R7_R1_FULL_RUNTIME_REPAIR'
+        canonical_parent_zip = $CanonicalName
+        canonical_parent_zip_sha256 = $CanonicalSha256
+        build_verified_parent_zip_sha256 = $parentHash
+        parent_tree_sha256 = $parentTree
+        protected_r6_hashes = $protected
+        r7_runtime_code_sha256 = $r7RuntimeHashes
+        original_start_xau_sha256 = $originalLauncherHash
+        allowed_inherited_change = @('START_XAU.bat')
+        final_holdout_accessed = $false
+        strategy_retuned = $false
+        demo_only = $true
+        execution_enabled_by_default = $false
     }
+    Write-Utf8NoBom (Join-Path $Extract 'R7_R1_PARENT_INTEGRITY.json') ($manifest | ConvertTo-Json -Depth 12)
 
     Push-Location $Extract
     try {
@@ -197,9 +201,7 @@ try {
         Invoke-Python $Python @('-m','unittest','discover','-s','r7_runtime_tests','-v')
         $offline = Invoke-PythonCapture $Python @('-m','r7_runtime.runtime','--offline-status')
     }
-    finally {
-        Pop-Location
-    }
+    finally { Pop-Location }
 
     $verification = [ordered]@{
         version = 'V16_R7_R1_FULL_RUNTIME_REPAIR'
@@ -207,6 +209,7 @@ try {
         parent_zip_verified = $true
         inherited_parent_files_verified = $true
         protected_r6_files_verified = $true
+        r7_runtime_code_verified = $true
         original_launcher_preserved = $true
         python_compile_pass = $true
         unit_tests_pass = $true
@@ -217,9 +220,8 @@ try {
     }
     Write-Utf8NoBom (Join-Path $Extract 'R7_R1_BUILD_VERIFICATION.json') ($verification | ConvertTo-Json -Depth 8)
 
-    Get-ChildItem -LiteralPath (Join-Path $Extract 'runtime') -ErrorAction SilentlyContinue | Where-Object {
-        $_.Name -like 'r7_r1_state.sqlite3*' -or $_.Name -eq 'r7_r1_runtime.lock'
-    } | Remove-Item -Force -ErrorAction SilentlyContinue
+    $stateDir = Join-Path $Extract 'r7_runtime_state'
+    if (Test-Path -LiteralPath $stateDir) { Remove-Item -LiteralPath $stateDir -Recurse -Force }
     Get-ChildItem -LiteralPath $Extract -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
     Get-ChildItem -LiteralPath $Extract -Recurse -File -Filter '*.pyc' -ErrorAction SilentlyContinue | Remove-Item -Force
 
@@ -232,34 +234,27 @@ try {
     Verify-InheritedTree $Verify $verifyManifest.parent_tree_sha256
     $verifyProtected = Get-ProtectedHashes $Verify
     foreach ($prop in $verifyManifest.protected_r6_hashes.PSObject.Properties) {
-        if ([string]$verifyProtected[$prop.Name] -ne [string]$prop.Value) {
-            Fail ('extracted ZIP protected hash mismatch: ' + $prop.Name)
-        }
+        if ([string]$verifyProtected[$prop.Name] -ne [string]$prop.Value) { Fail ('extracted ZIP protected hash mismatch: ' + $prop.Name) }
     }
+    Verify-HashMap $Verify $verifyManifest.r7_runtime_code_sha256 'extracted R7 runtime'
     $verifyFrozenHash = (Get-FileHash -LiteralPath (Join-Path $Verify 'r7_runtime\frozen_parent\START_XAU_R6_ORIGINAL.bat.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($verifyFrozenHash -ne [string]$verifyManifest.original_start_xau_sha256) {
-        Fail 'extracted ZIP frozen launcher hash mismatch'
-    }
+    if ($verifyFrozenHash -ne [string]$verifyManifest.original_start_xau_sha256) { Fail 'extracted ZIP frozen launcher hash mismatch' }
+
     Push-Location $Verify
     try {
         Invoke-Python $Python @('-m','compileall','-q','r7_runtime','r7_runtime_tests')
         Invoke-Python $Python @('-m','unittest','discover','-s','r7_runtime_tests','-v')
         Invoke-Python $Python @('-m','r7_runtime.runtime','--offline-status')
     }
-    finally {
-        Pop-Location
-    }
+    finally { Pop-Location }
 
     $finalHash = (Get-FileHash -LiteralPath $OutputZip -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath $OutputSha -Value ("{0}  {1}" -f $finalHash, $OutputName) -Encoding ASCII
-
     Write-Host ''
     Write-Host '[PASS] R7-R1 full repair package created and clean-extraction verified.' -ForegroundColor Green
     Write-Host ('File: ' + $OutputZip)
     Write-Host ('SHA-256: ' + $finalHash)
 }
 finally {
-    if (Test-Path -LiteralPath $Work) {
-        Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue }
 }
