@@ -4,6 +4,8 @@
 
 R7-R1 is a hardened operational runtime around the frozen V16 R6 strategy package.
 
+The **runtime repair scope is closed**: the adversarial repair audit has no known open Critical/High/Medium runtime defect. The runtime/test tree is verified on Linux Python 3.9/3.11/3.13 and Windows Python 3.11, including PowerShell builder parsing and the Windows single-instance-lock path.
+
 It does **not** retune R6 and does **not** access Final Holdout outcomes. Real/live account execution is prohibited.
 
 Most importantly, packaged R7-R1 order sending is currently **hard-locked even on demo** because the exact causal frozen-R6 decision producer has not yet been implemented and audited. This prevents hand-crafted JSON from masquerading as genuine R6 strategy output.
@@ -31,11 +33,11 @@ The launcher provides:
 1. Offline package + persistent-state integrity status
 2. MT5 account/quote/exposure status
 3. Crash-recovery reconciliation — never auto-resends
-4. Raw-intent diagnostic preflight — no send authority
+4. Raw-intent diagnostic preflight — no send authority and ephemeral state only
 5. Open the R6 decision inbox for staging only
 6. Producer/execution readiness status
 7. Explicit manual-review pause clearing after broker review
-8. Exit
+0. Exit
 
 There is no raw-order send option and no executable legacy R6 launcher option.
 
@@ -75,6 +77,8 @@ The integrity gate detects, among other things:
 
 Manual-review pause is persisted to SQLite before evidence archival and mirrored to the filesystem. Deleting only the marker does not resume operation. Resume requires the exact acknowledgement phrase, zero XAU exposure and zero unresolved in-flight intents.
 
+Raw diagnostic preflight is isolated from this persistent state. It runs against a temporary SQLite database and cannot reserve IDs or write events into the operational idempotency ledger.
+
 ## Broker safety
 
 Connected account/server identity is pinned and rechecked on sensitive operations. The gateway rejects non-SGD accounts, non-Blueberry servers, non-demo trade mode, account/server switching, invalid/stale quotes, excessive entry spread, invalid volume/stops geometry and disabled terminal/account/symbol trading permissions.
@@ -100,7 +104,7 @@ That parser proves the decision **shape and frozen constraints**, not how the up
 
 ## Causal-producer readiness lock
 
-`CAUSAL_R6_PRODUCER_READY` is hard-coded `False` in R7-R1. Consequently, the packaged runtime cannot reach automatic decision sending even if both demo unlock inputs are set.
+`CAUSAL_R6_PRODUCER_READY` is hard-coded `False` in R7-R1 and the current package manifest is required to attest the same value. Consequently, the packaged runtime cannot reach automatic decision sending even if both demo unlock inputs are set.
 
 A future audited successor may enable the runtime only after it contains an exact causal producer derived from the frozen R6 feature/selector source.
 
@@ -124,4 +128,4 @@ They are necessary but **not sufficient** in R7-R1.
 
 Every packaged invocation verifies the recorded inherited R6 and R7 runtime hashes before mutable state is used. `BUILD_R7_R1.ps1` also compiles, unit-tests and integrity-checks the assembled package before ZIP creation and repeats those checks after clean extraction before reporting PASS.
 
-R7-R1 should be described as a **hardened fail-closed runtime**. It is not yet a complete autonomous R6 trading system because the exact causal decision producer remains the next software phase.
+R7-R1 should be described as a **repaired hardened fail-closed runtime**. It is not yet a complete autonomous R6 trading system because the exact causal decision producer remains the next implementation phase.
