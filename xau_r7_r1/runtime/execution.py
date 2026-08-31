@@ -122,8 +122,6 @@ class ExecutionEngine:
             if exposure.position_count != 1 or exposure.pending_order_count != 0 or exposure.total_count != 1:
                 return {"ok": False, "reason": "POST_SEND_EXPOSURE_COUNT_MISMATCH", "exposure": detail}
         elif match.kind == "ORDER":
-            # A market request that remains as an order has unresolved fill state.
-            # Never mark it ACKNOWLEDGED; containment will cancel the owned order.
             return {"ok": False, "reason": "POST_SEND_PENDING_ORDER_NOT_SAFE_TO_ACK", "exposure": detail}
         elif match.kind == "DEAL":
             if exposure.total_count != 0:
@@ -160,6 +158,36 @@ class ExecutionEngine:
             )
         except Exception:
             return None
+
+    @staticmethod
+    def _submitted_protection_check(position, base_detail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        submitted = base_detail.get("submitted_request")
+        if not isinstance(submitted, dict):
+            return None
+        try:
+            expected_sl = float(submitted["sl"])
+            expected_tp = float(submitted["tp"])
+        except Exception:
+            return {"ok": False, "reason": "SUBMITTED_PROTECTION_EVIDENCE_INVALID"}
+        if not all(math.isfinite(v) and v > 0 for v in (expected_sl, expected_tp)):
+            return {"ok": False, "reason": "SUBMITTED_PROTECTION_EVIDENCE_INVALID"}
+        actual_sl, actual_tp = float(position.sl), float(position.tp)
+        tolerance = 1e-8
+        if abs(actual_sl - expected_sl) > tolerance:
+            return {
+                "ok": False,
+                "reason": "ACTUAL_STOP_DIFFERS_FROM_SUBMITTED_STOP",
+                "expected_sl": expected_sl,
+                "actual_sl": actual_sl,
+            }
+        if abs(actual_tp - expected_tp) > tolerance:
+            return {
+                "ok": False,
+                "reason": "ACTUAL_TARGET_DIFFERS_FROM_SUBMITTED_TARGET",
+                "expected_tp": expected_tp,
+                "actual_tp": actual_tp,
+            }
+        return {"ok": True, "expected_sl": expected_sl, "expected_tp": expected_tp}
 
     def _filled_position_safety(self, intent_id: str, *, base_detail: Dict[str, Any]) -> Dict[str, Any]:
         payload = self._expected_payload(intent_id)
@@ -204,16 +232,16 @@ class ExecutionEngine:
         if expected_side == "SELL" and not (float(position.tp) < float(position.price_open) < float(position.sl)):
             return {"ok": False, "reason": "ACTUAL_SHORT_PROTECTIVE_GEOMETRY_INVALID"}
 
+        protection = self._submitted_protection_check(position, base_detail)
+        if protection is not None and not protection["ok"]:
+            return protection
+
         pre_send_account = self._account_from_detail(base_detail)
         if pre_send_account is not None:
-            # Immediate acknowledgement: evaluate the actual broker fill-to-stop
-            # loss against the account equity that authorized the send.
             risk_account = pre_send_account
             stop_loss_sgd = self.gateway.position_stop_loss_sgd(position)
             risk_basis = "PRE_SEND_EQUITY_ACTUAL_FILL_TO_STOP"
         else:
-            # Restart/pre-existing reconciliation has no trustworthy pre-send
-            # snapshot. Use current equity and remaining market-to-stop loss.
             risk_account = self.gateway.account_snapshot()
             stop_loss_sgd = self.gateway.position_remaining_stop_loss_sgd(position)
             risk_basis = "CURRENT_EQUITY_REMAINING_TO_STOP"
@@ -228,6 +256,7 @@ class ExecutionEngine:
             "reason": decision.reason,
             "risk_basis": risk_basis,
             "position": asdict(position),
+            "protection_match": protection,
             "risk_account": asdict(risk_account),
             "risk": asdict(decision.risk),
         }
@@ -296,6 +325,15 @@ class ExecutionEngine:
                 detail=detail,
             )
 
+        immediate_send = bool(base_detail.get("order_send_returned_success") or base_detail.get("recovered_after_send_exception"))
+        if match.kind == "DEAL" and immediate_send:
+            return self._manual_review_with_containment(
+                intent_id,
+                match,
+                reason="POST_SEND_DEAL_WITHOUT_STABLE_POSITION",
+                detail=detail,
+            )
+
         if match.kind == "POSITION":
             try:
                 fill_safety = self._filled_position_safety(intent_id, base_detail=base_detail)
@@ -315,8 +353,6 @@ class ExecutionEngine:
                     detail=detail,
                 )
 
-        # DEAL + zero XAU exposure means there is no remaining position/order to
-        # contain. POSITION is acknowledged only after the actual-fill gate above.
         self.store.transition(intent_id, "ACKNOWLEDGED", broker_ticket=match.ticket, detail=detail)
         return {
             "ok": True,
@@ -400,8 +436,10 @@ class ExecutionEngine:
         }
         try:
             result = self.gateway.order_send(second["request"])
+            send_state = str(self.gateway.order_send_state(result))
             ticket = int(getattr(result, "order", 0) or getattr(result, "deal", 0) or 0) or None
             send_detail.update({
+                "order_send_state": send_state,
                 "order_send_retcode": int(getattr(result, "retcode", 0) or 0),
                 "order_send_order": int(getattr(result, "order", 0) or 0),
                 "order_send_deal": int(getattr(result, "deal", 0) or 0),
@@ -409,6 +447,13 @@ class ExecutionEngine:
                 "order_send_price": float(getattr(result, "price", 0.0) or 0.0),
             })
             self.store.transition(intent.client_intent_id, "SUBMITTED", broker_ticket=ticket, detail=send_detail)
+            if send_state != "DONE":
+                return self._manual_review_with_containment(
+                    intent.client_intent_id,
+                    BrokerMatch(False, None, ticket, send_state),
+                    reason="NON_ATOMIC_ORDER_SEND_RESULT:" + send_state,
+                    detail=send_detail,
+                )
         except Exception as send_exc:
             try:
                 match = self._find_broker_match_fail_closed(intent.client_intent_id, after_send=True)
