@@ -1,6 +1,6 @@
 # XAU V16 R7-R1 — Full Runtime Repair
 
-This branch repairs the failed R7 overlay. It is a software-engineering successor around the frozen canonical R6 package; it does not retune strategy logic and does not read Final Holdout outcomes.
+R7-R1 is the hardened operational-runtime successor around the exact canonical frozen R6 package. It does not retune strategy logic and does not read Final Holdout outcomes.
 
 ## Canonical parent
 
@@ -10,30 +10,56 @@ Required SHA-256:
 
 `8b54c6bc53c38c34b8e88d39893687e8ba75b063897c8b097aaedc68d614fca7`
 
-The builder refuses any parent with a different digest.
+The builder refuses any different parent digest.
 
-## Repair goals
+## What the repaired runtime now does
 
-- Verify the canonical parent ZIP before extraction.
-- Hash every inherited parent file and verify all inherited files remain byte-identical except the intentionally replaced top-level launcher.
-- Preserve the original launcher bytes as non-executable frozen evidence.
-- Verify critical R6 strategy/policy files again at runtime.
-- Add SQLite WAL + `synchronous=FULL` transactional state.
-- Add a hash-chained audit ledger with `BEGIN IMMEDIATE` writes.
-- Add idempotent intent reservation and a crash-safe order state machine.
-- Add single-instance locking.
-- Derive projected stop loss from MetaTrader 5 `order_calc_profit`; never trust a caller-supplied loss number.
-- Enforce one XAUUSD.i exposure domain across positions and pending orders.
-- Enforce the frozen 0.55% operating cap, 0.60% constitutional ceiling, S$850 projected-equity floor, 0.02 lot maximum, and permanent `AUX_RF_LTM` retirement.
-- Keep martingale, recovery, averaging down, pyramiding and loss-contingent sizing disabled.
-- Keep demo-only protection hard-coded in R7-R1.
-- Use `order_check` before any `order_send`.
-- Never automatically resubmit an ambiguous in-flight order after a crash.
-- Keep order sending disabled by default and require an explicit demo-only environment unlock.
-- Run compile, unit, integrity, package-extraction and offline-runtime verification before creating a release ZIP.
+- Verifies the canonical parent and inherited R6 files.
+- Preserves protected R6 strategy/policy bytes.
+- Uses SQLite WAL + `synchronous=FULL` state and a hash-chained audit ledger.
+- Replays persistent state against the audit ledger before any MT5 call.
+- Enforces idempotent decision/order intent handling and crash recovery with no automatic resend of ambiguous orders.
+- Pins the connected Blueberry demo account/server and rejects account switching.
+- Requires SGD, `XAUUSD.i`, demo trade mode and valid MT5 terminal/account/symbol trading permissions.
+- Counts all `XAUUSD.i` positions and pending orders before admitting new exposure.
+- Derives pre-send stop risk from MT5 and budgets adverse execution deviation.
+- Enforces the frozen 0.55% operating cap, 0.60% constitutional ceiling, S$850 projected-equity floor, 0.02 lot maximum and permanent `AUX_RF_LTM` retirement.
+- Keeps martingale, recovery, averaging down, pyramiding and loss-contingent sizing disabled.
+- Reprices only the already-selected frozen ATR geometry at each broker preflight; it does not re-select strategy logic.
+- Verifies actual filled side, lot, SL, TP and actual stop risk before ACK.
+- Never ACKs `PLACED` or `DONE_PARTIAL` market-send outcomes.
+- Contains unsafe/ambiguous R7-owned exposure and enters persistent manual-review state rather than resubmitting.
+- Persists manual-review pause before evidence archival; explicit resume requires zero XAU exposure, zero in-flight intents and the exact acknowledgement phrase.
+- Accepts automatic execution only through the strict admitted-R6 decision contract. Raw/manual intents are diagnostic-only and cannot send.
+- Rejects stale decision emissions and independently rejects stale underlying R6 signal timestamps.
+- Uses a single operator launcher generated as `START_XAU.bat`.
+- Keeps real/live account execution prohibited.
 
-## Important boundary
+## Demo execution lock
 
-R7-R1 repairs the operational broker/risk/state layer. The frozen R6 research engine is preserved. Automatic live signal generation from the research/backtest engine is not invented or silently approximated. Broker execution accepts explicit R6-derived `OrderIntent` JSON at the adapter boundary until a separately auditable causal live-signal adapter is implemented.
+Automatic admitted-R6 decision execution remains OFF unless both are present:
 
-That limitation is deliberate: the repair must not turn a research backtest API into a fake live strategy implementation.
+1. `R7_R1_RUNTIME_CONFIG.json` contains `"request_demo_execution": true`
+2. environment variable `XAU_R7_R1_ENABLE_DEMO_EXECUTION=YES_I_ACCEPT_DEMO_ONLY`
+
+These switches do not authorize raw/manual intents. They only enable the frozen-R6 decision inbox path on a validated Blueberry demo account.
+
+## Decision inbox
+
+The runtime creates `r7_r6_bridge/inbox`. A decision must be a direct-child JSON file and must pass the strict frozen-R6 schema/policy/parent/source/geometry/lot/timestamp checks before it can become an executable intent. Files are hashed and moved to processed, rejected or manual-review evidence buckets.
+
+Any ambiguous post-send state stops automatic consumption and persists a manual-review pause.
+
+## Important remaining boundary
+
+The broker/risk/state/containment runtime is repaired. The remaining autonomous-system gap is the **exact causal R6 decision producer**.
+
+R7-R1 deliberately does not manufacture a live strategy by copying validation rows or approximating the frozen research selector. The current inbox consumes an already-admitted R6 decision and validates its contract; it does not prove how the upstream decision was calculated.
+
+The next software phase is therefore to derive a causal decision producer from the exact frozen R6 feature/selector source, keeping the frozen policy unchanged, and have that producer emit the admitted-decision contract directly into the hardened runtime.
+
+## Build
+
+`BUILD_R7_R1.ps1` requires the exact canonical R6 ZIP beside the script. It compiles and tests the runtime before packaging, generates integrity manifests, creates the R7-R1 ZIP, extracts it into a clean directory, reruns compile/tests/offline integrity checks, verifies hashes and writes a SHA-256 sidecar.
+
+Do not call the autonomous trading system production-ready or live-ready until the exact causal producer is implemented and separately audited. Live accounts remain prohibited by this runtime regardless.
