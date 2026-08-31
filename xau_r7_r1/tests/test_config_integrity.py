@@ -65,15 +65,25 @@ class ConfigTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             self.assertFalse(runtime.demo_execution_enabled(cfg))
 
-    def test_demo_execution_needs_producer_config_and_exact_environment_unlock(self):
+    def test_readiness_switch_alone_cannot_unlock_without_admission_evidence(self):
+        cfg = {"request_demo_execution": True}
+        env = {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "YES_I_ACCEPT_DEMO_ONLY"}
+        with mock.patch.object(runtime, "CAUSAL_R6_PRODUCER_READY", True):
+            with mock.patch.object(runtime, "producer_admission_status", return_value={"ready": False, "reason": "missing parity"}):
+                with mock.patch.dict(os.environ, env, clear=True):
+                    self.assertFalse(runtime.producer_execution_admitted())
+                    self.assertFalse(runtime.demo_execution_enabled(cfg))
+
+    def test_demo_execution_needs_admitted_producer_config_and_exact_environment_unlock(self):
         cfg = {"request_demo_execution": True}
         with mock.patch.object(runtime, "CAUSAL_R6_PRODUCER_READY", True):
-            with mock.patch.dict(os.environ, {}, clear=True):
-                self.assertFalse(runtime.demo_execution_enabled(cfg))
-            with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "wrong"}, clear=True):
-                self.assertFalse(runtime.demo_execution_enabled(cfg))
-            with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "YES_I_ACCEPT_DEMO_ONLY"}, clear=True):
-                self.assertTrue(runtime.demo_execution_enabled(cfg))
+            with mock.patch.object(runtime, "producer_admission_status", return_value={"ready": True}):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    self.assertFalse(runtime.demo_execution_enabled(cfg))
+                with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "wrong"}, clear=True):
+                    self.assertFalse(runtime.demo_execution_enabled(cfg))
+                with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "YES_I_ACCEPT_DEMO_ONLY"}, clear=True):
+                    self.assertTrue(runtime.demo_execution_enabled(cfg))
 
 
 class PackageIntegrityTests(unittest.TestCase):
