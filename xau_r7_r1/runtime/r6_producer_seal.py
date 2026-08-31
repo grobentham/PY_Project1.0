@@ -16,12 +16,14 @@ class ProducerSealError(RuntimeError):
     pass
 
 
-SEAL_VERSION = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V1"
+SEAL_VERSION = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V2"
 GENERATED_SEAL_FILENAME = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL.json"
 PRODUCER_MODULE_RELATIVE = "r7_runtime/r6_causal_producer.py"
 EVIDENCE_FILES: Tuple[str, ...] = (
     "R7_R1_R6_SOURCE_PROBE.json",
     "R7_R1_R6_SOURCE_BUNDLE_MANIFEST.json",
+    "R7_R1_R6_PARITY_FIXTURES.jsonl",
+    "R7_R1_R6_PRODUCER_REPLAY.json",
     "R7_R1_R6_REFERENCE_STREAM.jsonl",
     "R7_R1_R6_PRODUCER_STREAM.jsonl",
     "R7_R1_R6_PARITY_ISOLATION.json",
@@ -127,6 +129,12 @@ def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
             raise ProducerSealError("CANDIDATE_HOLDOUT_BOUNDARY_BREACH")
         if admission.get("strategy_retuned") is not False:
             raise ProducerSealError("CANDIDATE_RETUNING_BREACH")
+        replay = admission.get("trusted_replay")
+        if not isinstance(replay, dict) or replay.get("deterministic_double_run") is not True:
+            raise ProducerSealError("CANDIDATE_TRUSTED_REPLAY_NOT_PROVEN")
+        parity = admission.get("parity")
+        if not isinstance(parity, dict) or parity.get("trusted_producer_replay_pass") is not True:
+            raise ProducerSealError("CANDIDATE_PARITY_REPLAY_NOT_PROVEN")
 
     if sha256_file(runtime_root / "R7_R1_PARENT_INTEGRITY.json") != before_parent:
         raise ProducerSealError("BASELINE_PARENT_MANIFEST_MUTATED")
@@ -141,13 +149,18 @@ def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
         "candidate_files_sha256": candidate_hashes,
         "producer_module": PRODUCER_MODULE_RELATIVE,
         "producer_module_sha256": candidate_hashes[PRODUCER_MODULE_RELATIVE],
+        "fixture_corpus_sha256": candidate_hashes["R7_R1_R6_PARITY_FIXTURES.jsonl"],
+        "producer_replay_attestation_sha256": candidate_hashes["R7_R1_R6_PRODUCER_REPLAY.json"],
+        "producer_stream_sha256": candidate_hashes["R7_R1_R6_PRODUCER_STREAM.jsonl"],
         "admission_version": admission.get("admission_version"),
         "admission_ready": True,
+        "trusted_producer_replay_pass": True,
+        "producer_source_policy_pass": True,
         "baseline_mutated": False,
         "execution_unlocked": False,
         "final_holdout_accessed": False,
         "strategy_retuned": False,
-        "note": "Candidate seal proves admission in an isolated copy only; it does not change the constitutional readiness switch or enable order execution.",
+        "note": "Candidate seal proves trusted replay plus parity admission in an isolated copy only; it does not change the constitutional readiness switch or enable order execution.",
     }
 
 
