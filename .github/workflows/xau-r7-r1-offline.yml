@@ -34,6 +34,7 @@ jobs:
           mkdir -p ci_r7/r7_runtime ci_r7/r7_runtime_tests
           cp -R xau_r7_r1/runtime/. ci_r7/r7_runtime/
           cp -R xau_r7_r1/tests/. ci_r7/r7_runtime_tests/
+          cp xau_r7_r1/START_XAU_R7_R1.bat.template ci_r7/START_XAU.bat
       - name: Compile R7-R1 runtime
         working-directory: ci_r7
         run: python -m compileall -q r7_runtime r7_runtime_tests
@@ -84,6 +85,7 @@ jobs:
           New-Item -ItemType Directory -Force ci_r7/r7_runtime_tests | Out-Null
           Copy-Item xau_r7_r1/runtime/* ci_r7/r7_runtime/ -Recurse -Force
           Copy-Item xau_r7_r1/tests/* ci_r7/r7_runtime_tests/ -Recurse -Force
+          Copy-Item xau_r7_r1/START_XAU_R7_R1.bat.template ci_r7/START_XAU.bat -Force
       - name: Compile R7-R1 runtime on Windows
         working-directory: ci_r7
         run: python -m compileall -q r7_runtime r7_runtime_tests
