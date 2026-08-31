@@ -1,0 +1,42 @@
+name: XAU R7-R1 offline safety
+
+on:
+  push:
+    branches:
+      - xau-r7-r1-full-repair
+    paths:
+      - 'xau_r7_r1/**'
+      - '.github/workflows/xau-r7-r1-offline.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-runtime-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.11', '3.13']
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Assemble builder-equivalent runtime tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf ci_r7
+          mkdir -p ci_r7/r7_runtime ci_r7/r7_runtime_tests
+          cp -R xau_r7_r1/runtime/. ci_r7/r7_runtime/
+          cp -R xau_r7_r1/tests/. ci_r7/r7_runtime_tests/
+      - name: Compile R7-R1 runtime
+        working-directory: ci_r7
+        run: python -m compileall -q r7_runtime r7_runtime_tests
+      - name: Run offline safety regression
+        working-directory: ci_r7
+        run: python -m unittest discover -s r7_runtime_tests -v
