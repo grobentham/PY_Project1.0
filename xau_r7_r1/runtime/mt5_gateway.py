@@ -274,19 +274,22 @@ class MT5Gateway:
             raise GatewayError("INVALID_COMMISSION_PROJECTION")
         return commission
 
-    def _calc_stop_loss(self, side: str, lot: float, entry_price: float, stop_price: float) -> float:
+    def _calc_stop_loss(self, side: str, lot: float, entry_price: float, stop_price: float, *, commission_fraction: float = 1.0) -> float:
         mt5 = self._require()
         side_u = side.upper()
         order_type = mt5.ORDER_TYPE_BUY if side_u == "BUY" else mt5.ORDER_TYPE_SELL if side_u == "SELL" else None
         if order_type is None:
             raise GatewayError("UNSUPPORTED_SIDE")
+        fraction = float(commission_fraction)
+        if not math.isfinite(fraction) or fraction < 0 or fraction > 1:
+            raise GatewayError("INVALID_COMMISSION_FRACTION")
         pnl = mt5.order_calc_profit(order_type, SYMBOL, float(lot), float(entry_price), float(stop_price))
         if pnl is None:
             raise GatewayError(f"ORDER_CALC_PROFIT_FAILED:{mt5.last_error()}")
         pnl = float(pnl)
         if not math.isfinite(pnl) or pnl >= 0:
             raise GatewayError(f"INVALID_PROJECTED_STOP_PNL:{pnl}")
-        projected = (-pnl) + self._commission_for_lot(lot)
+        projected = (-pnl) + self._commission_for_lot(lot) * fraction
         if not math.isfinite(projected) or projected <= 0:
             raise GatewayError(f"INVALID_PROJECTED_STOP_WITH_COMMISSION:{projected}")
         return projected
@@ -295,9 +298,6 @@ class MT5Gateway:
         info = self._symbol_info_checked()
         point = float(info.point)
         side = intent.side.upper()
-        # Budget the worst price allowed by the request's frozen deviation before
-        # the send. Market Execution can still differ, so actual fill risk is
-        # independently recomputed after reconciliation.
         worst_entry = float(entry_price) + ORDER_DEVIATION_POINTS * point if side == "BUY" else float(entry_price) - ORDER_DEVIATION_POINTS * point
         if worst_entry <= 0 or not math.isfinite(worst_entry):
             raise GatewayError("INVALID_WORST_CASE_ENTRY")
@@ -307,6 +307,23 @@ class MT5Gateway:
         if position.sl <= 0:
             raise GatewayError("OWNED_POSITION_MISSING_STOP_LOSS")
         return self._calc_stop_loss(position.side, position.volume, position.price_open, position.sl)
+
+    def position_remaining_stop_loss_sgd(self, position: OwnedPositionSnapshot) -> float:
+        if position.sl <= 0:
+            raise GatewayError("OWNED_POSITION_MISSING_STOP_LOSS")
+        snap = self.symbol_snapshot()
+        side = position.side.upper()
+        current_exit = snap.bid if side == "BUY" else snap.ask if side == "SELL" else None
+        if current_exit is None:
+            raise GatewayError("OWNED_POSITION_SIDE_INVALID")
+        if side == "BUY" and position.sl >= current_exit:
+            raise GatewayError("OWNED_POSITION_STOP_ALREADY_AT_OR_THROUGH_MARKET")
+        if side == "SELL" and position.sl <= current_exit:
+            raise GatewayError("OWNED_POSITION_STOP_ALREADY_AT_OR_THROUGH_MARKET")
+        # Current equity already reflects entry-side costs and current P/L. The
+        # remaining-to-stop estimate therefore adds only an exit-side half of
+        # the frozen round-trip commission assumption.
+        return self._calc_stop_loss(side, position.volume, current_exit, position.sl, commission_fraction=0.5)
 
     def _select_filling_mode(self) -> int:
         mt5 = self._require()
@@ -371,20 +388,30 @@ class MT5Gateway:
         return result
 
     def owned_positions(self, client_intent_id: str) -> List[OwnedPositionSnapshot]:
+        self._account_info_checked()
         needle = self._comment(client_intent_id)
         out: List[OwnedPositionSnapshot] = []
         mt5 = self._require()
         for p in self._positions():
             if int(getattr(p, "magic", 0)) != MAGIC or str(getattr(p, "comment", "")) != needle:
                 continue
-            side = "BUY" if int(p.type) == int(mt5.POSITION_TYPE_BUY) else "SELL"
+            ptype = int(getattr(p, "type", -1))
+            if ptype == int(mt5.POSITION_TYPE_BUY):
+                side = "BUY"
+            elif ptype == int(mt5.POSITION_TYPE_SELL):
+                side = "SELL"
+            else:
+                raise GatewayError(f"OWNED_POSITION_TYPE_INVALID:{ptype}")
             values = [float(p.volume), float(p.price_open), float(p.sl), float(p.tp)]
             if not all(math.isfinite(v) for v in values):
                 raise GatewayError("OWNED_POSITION_NUMERIC_STATE_INVALID")
+            if values[0] <= 0 or values[1] <= 0:
+                raise GatewayError("OWNED_POSITION_VOLUME_OR_PRICE_INVALID")
             out.append(OwnedPositionSnapshot(int(p.ticket), str(p.symbol), side, values[0], values[1], values[2], values[3], int(p.magic), str(getattr(p, "comment", ""))))
         return out
 
     def owned_orders(self, client_intent_id: str) -> List:
+        self._account_info_checked()
         needle = self._comment(client_intent_id)
         return [o for o in self._orders() if int(getattr(o, "magic", 0)) == MAGIC and str(getattr(o, "comment", "")) == needle]
 
@@ -394,35 +421,58 @@ class MT5Gateway:
             raise GatewayError("MULTIPLE_OWNED_POSITIONS_FOR_ONE_INTENT")
         return rows[0] if rows else None
 
-    def emergency_flatten_owned_intent(self, client_intent_id: str) -> Dict:
-        """Best-effort fail-closed containment for this runtime's own intent only.
+    def _emergency_close_price(self, position_side: str) -> float:
+        mt5 = self._require()
+        self._account_info_checked()
+        tick = mt5.symbol_info_tick(SYMBOL)
+        if tick is None:
+            raise GatewayError("EMERGENCY_TICK_UNAVAILABLE")
+        bid, ask = float(tick.bid), float(tick.ask)
+        if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask <= 0 or ask < bid:
+            raise GatewayError("EMERGENCY_MARKET_QUOTE_INVALID")
+        side = position_side.upper()
+        if side == "BUY":
+            return bid
+        if side == "SELL":
+            return ask
+        raise GatewayError("EMERGENCY_POSITION_SIDE_INVALID")
 
-        Never touches unrelated XAU positions/orders. A remaining owned position or
-        order after the attempt is reported as failure and must keep the bridge paused.
+    def emergency_flatten_owned_intent(self, client_intent_id: str) -> Dict:
+        """Best-effort containment for this runtime's own intent only.
+
+        Normal entry spread/tick-age gates are deliberately not reused here: an
+        unsafe owned exposure must not remain open merely because the market is
+        currently too wide for a new entry. Broker/account identity and quote
+        sanity are still enforced, and any residual exposure is reported.
         """
         mt5 = self._require()
         self.assert_trading_permissions(for_close=True)
         cancelled, closed = [], []
         for order in self.owned_orders(client_intent_id):
-            request = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(order.ticket), "symbol": SYMBOL, "magic": MAGIC, "comment": "R7R1:EMERGENCY_CANCEL"[:31]}
+            request = {
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": int(order.ticket),
+                "symbol": SYMBOL,
+                "magic": MAGIC,
+                "comment": "R7R1:EMERGENCY_CANCEL"[:31],
+            }
             result = mt5.order_send(request)
             if result is None or int(result.retcode) != int(mt5.TRADE_RETCODE_DONE):
                 raise GatewayError(f"EMERGENCY_CANCEL_FAILED:{getattr(result, 'retcode', None)}:{getattr(result, 'comment', '')}")
             cancelled.append(int(order.ticket))
 
         for position in self.owned_positions(client_intent_id):
-            snap = self.symbol_snapshot()
             if position.side == "BUY":
-                order_type, price = mt5.ORDER_TYPE_SELL, snap.bid
+                order_type = mt5.ORDER_TYPE_SELL
             else:
-                order_type, price = mt5.ORDER_TYPE_BUY, snap.ask
+                order_type = mt5.ORDER_TYPE_BUY
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "position": int(position.ticket),
                 "symbol": SYMBOL,
                 "volume": float(position.volume),
                 "type": order_type,
-                "price": float(price),
+                "price": float(self._emergency_close_price(position.side)),
                 "deviation": EMERGENCY_CLOSE_DEVIATION_POINTS,
                 "magic": MAGIC,
                 "comment": "R7R1:EMERGENCY_FLAT"[:31],
@@ -445,6 +495,7 @@ class MT5Gateway:
         }
 
     def find_intent_at_broker(self, client_intent_id: str) -> BrokerMatch:
+        self._account_info_checked()
         needle = self._comment(client_intent_id)
         for p in self._positions():
             if int(p.magic) == MAGIC and str(getattr(p, "comment", "")) == needle:
