@@ -4,11 +4,13 @@
 
 R7-R1 is a hardened operational runtime around the frozen V16 R6 strategy package.
 
-The **runtime repair scope is closed**: the adversarial repair audit has no known open Critical/High/Medium runtime defect. The runtime/test tree is verified on Linux Python 3.9/3.11/3.13 and Windows Python 3.11, including PowerShell builder parsing and the Windows single-instance-lock path.
+The **broker/risk/state/containment runtime repair scope is closed**: the adversarial repair audit has no known open Critical/High/Medium runtime defect. The runtime/test tree is exercised on Linux Python 3.9/3.11/3.13 and Windows Python 3.11, including Windows PowerShell parser checks and the Windows single-instance-lock path.
 
-It does **not** retune R6 and does **not** access Final Holdout outcomes. Real/live account execution is prohibited.
+The **causal-producer verification infrastructure is also implemented**: exact-source extraction, local Python dependency closure, deep AST source mapping, causal parity evidence, producer admission, isolated candidate sealing and a non-promoting fused-release eligibility precheck.
 
-Most importantly, packaged R7-R1 order sending is currently **hard-locked even on demo** because the exact causal frozen-R6 decision producer has not yet been implemented and audited. This prevents hand-crafted JSON from masquerading as genuine R6 strategy output.
+The actual exact causal `r6_causal_producer.py` has **not** been admitted or fused into the runtime. Therefore packaged R7-R1 order sending remains hard-locked even on demo. Real/live-account execution is prohibited.
+
+R7-R1 does **not** retune R6 and does **not** access Final Holdout outcomes.
 
 ## Requirements
 
@@ -61,59 +63,48 @@ Pre-send projected stop risk comes from MT5 `order_calc_profit()` plus the froze
 
 After a broker fill, ACK requires actual side, actual full lot, SL, TP, submitted protective-price preservation and actual stop-risk verification. `PLACED` and `DONE_PARTIAL` are never ACKed. Unsafe or ambiguous owned exposure enters scoped emergency containment and `MANUAL_REVIEW_NO_RESUBMIT`.
 
-## Persistent-state safety
+## Persistent-state and broker safety
 
 SQLite is configured with WAL and `synchronous=FULL`. Runtime state and intent state are checked against the append-only hash-chained audit ledger before MT5 is touched.
 
-The integrity gate detects, among other things:
+The integrity gate detects deleted/injected intents, payload/state/ticket mutation, unaudited runtime-state rows and audit-chain mutation. Manual-review pause is persisted before evidence archival. Resume requires the exact acknowledgement phrase, zero XAU exposure and zero unresolved in-flight intents.
 
-- deleted or injected intents
-- payload or state mutation
-- injected/changed broker tickets
-- deleted audited runtime-state rows
-- injected unaudited runtime-state rows
-- runtime-state value mutation
-- audit-chain mutation
+Raw diagnostic preflight uses a temporary SQLite database and cannot contaminate the operational idempotency/audit ledger.
 
-Manual-review pause is persisted to SQLite before evidence archival and mirrored to the filesystem. Deleting only the marker does not resume operation. Resume requires the exact acknowledgement phrase, zero XAU exposure and zero unresolved in-flight intents.
+Connected account/server identity is pinned and rechecked on sensitive operations. The gateway rejects non-SGD accounts, non-Blueberry servers, non-demo trade mode, account/server switching, invalid/stale quotes, excessive entry spread, invalid volume/stops geometry and disabled trading permissions.
 
-Raw diagnostic preflight is isolated from this persistent state. It runs against a temporary SQLite database and cannot reserve IDs or write events into the operational idempotency ledger.
-
-## Broker safety
-
-Connected account/server identity is pinned and rechecked on sensitive operations. The gateway rejects non-SGD accounts, non-Blueberry servers, non-demo trade mode, account/server switching, invalid/stale quotes, excessive entry spread, invalid volume/stops geometry and disabled terminal/account/symbol trading permissions.
-
-Emergency containment is scoped to R7-R1-owned magic/comment exposure only. It does not touch unrelated XAU positions. Normal entry spread restrictions do not prevent an emergency close attempt.
+Emergency containment is scoped to R7-R1-owned magic/comment exposure only and does not touch unrelated XAU positions.
 
 ## Frozen-R6 decision boundary
 
-The runtime contains a strict admitted-decision parser for the eventual causal R6 producer. It checks:
+The runtime contains a strict admitted-decision parser for the eventual causal R6 producer. It checks frozen schema/policy/parent/source/priority/family/geometry/lot/timestamps/freshness, permanent `AUX_RF_LTM` retirement and idempotent decision fingerprinting.
 
-- frozen schema and policy ID
-- exact canonical R6 parent SHA-256
-- admitted flag
-- source / priority / family mapping
-- frozen source-specific geometry
-- canonical lot ceiling
-- emission freshness
-- independent underlying signal freshness
-- retired `AUX_RF_LTM`
-- idempotent decision fingerprint
+That parser proves the decision **shape and frozen constraints**, not how the upstream signal was calculated. A manually created JSON is therefore never sufficient provenance for autonomous execution.
 
-That parser proves the decision **shape and frozen constraints**, not how the upstream signal was calculated. Therefore a manually created JSON is not sufficient provenance for autonomous execution.
+## Exact-source producer workflow
+
+The producer toolchain is deliberately fail-closed:
+
+1. `EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1` requires the exact canonical R6 ZIP SHA-256.
+2. Source-bundle V3 extracts only the frozen Python entry source plus recursively resolved archive-local Python dependencies. Required local imports must resolve; dynamic imports, symlinks, unsafe paths and duplicates fail closed. Non-archive imports are recorded explicitly.
+3. Source-probe V2 maps the frozen entry engines through AST without importing/executing strategy code. It records normalized source, function AST hashes, spans, calls, referenced names, literals and assignments.
+4. Producer-parity V2 compares causal-prefix reference/producer streams and binds the result to the source-bundle manifest, source probe, producer module, streams and isolation manifest.
+5. Producer-admission V3 independently verifies every source-closure file against canonical parent-tree hashes and requires zero parity mismatch, zero lookahead violation and zero retired-source emission.
+6. `SEAL_R6_PRODUCER_CANDIDATE.ps1` re-runs admission in a temporary baseline copy and produces a candidate seal without mutating the baseline or unlocking execution.
+7. `PRECHECK_R6_FUSED_RELEASE.ps1` verifies the locked baseline package, freshly reseals the candidate, requires the supplied seal to match and reports only whether the candidate is eligible to enter a **separate future fused-build step**.
+
+Candidate sealing and fused-release precheck never alter `CAUSAL_R6_PRODUCER_READY`, never create an execution-enabled package and never authorize trading.
 
 ## Causal-producer readiness lock
 
-`CAUSAL_R6_PRODUCER_READY` is hard-coded `False` in R7-R1 and the current package manifest is required to attest the same value. Consequently, the packaged runtime cannot reach automatic decision sending even if both demo unlock inputs are set.
+`CAUSAL_R6_PRODUCER_READY` is hard-coded `False` in R7-R1 and the package-integrity manifest must attest the same value. Consequently, packaged R7-R1 cannot reach automatic decision sending even if both demo unlock inputs are set.
 
-A future audited successor may enable the runtime only after it contains an exact causal producer derived from the frozen R6 feature/selector source.
-
-The existing two demo unlock inputs are retained as additional gates for that successor:
+The two operator demo inputs remain future additional gates only:
 
 1. `R7_R1_RUNTIME_CONFIG.json` -> `"request_demo_execution": true`
 2. `XAU_R7_R1_ENABLE_DEMO_EXECUTION=YES_I_ACCEPT_DEMO_ONLY`
 
-They are necessary but **not sufficient** in R7-R1.
+They are necessary but **not sufficient**. Runtime execution admission also requires the complete producer source/parity/admission evidence chain.
 
 ## Crash and duplicate behavior
 
@@ -122,10 +113,12 @@ They are necessary but **not sufficient** in R7-R1.
 - Broker magic/comment is checked for duplicates.
 - `SUBMITTING` is persisted before `order_send()`.
 - Restart recovery reconciles in-flight state and never auto-resubmits.
-- Reconciliation failures after a possible send attempt scoped containment before terminal manual review.
+- Reconciliation failures after a possible send attempt attempt scoped containment before terminal manual review.
 
 ## Integrity and build behavior
 
-Every packaged invocation verifies the recorded inherited R6 and R7 runtime hashes before mutable state is used. `BUILD_R7_R1.ps1` also compiles, unit-tests and integrity-checks the assembled package before ZIP creation and repeats those checks after clean extraction before reporting PASS.
+Every packaged invocation verifies recorded inherited R6 and R7 runtime hashes before mutable state is used. `BUILD_R7_R1.ps1` compiles, unit-tests and integrity-checks the assembled package before ZIP creation and repeats those checks after clean extraction before reporting PASS.
 
-R7-R1 should be described as a **repaired hardened fail-closed runtime**. It is not yet a complete autonomous R6 trading system because the exact causal decision producer remains the next implementation phase.
+The R7-R1 builder intentionally emits a **producer-locked baseline**. Producer candidate sealing/precheck is preparation evidence for a later explicit successor fused-release builder; it is not a post-build patch mechanism.
+
+R7-R1 should be described as a **repaired hardened fail-closed runtime with completed producer-verification infrastructure**. It is not yet a complete autonomous R6 trading system because the exact causal producer remains unimplemented/unadmitted in the package.
