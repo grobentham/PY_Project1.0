@@ -114,6 +114,7 @@ class PackageIntegrityTests(unittest.TestCase):
             "strategy_retuned": False,
             "demo_only": True,
             "execution_enabled_by_default": False,
+            "causal_r6_producer_ready": False,
         }
         (root / "R7_R1_PARENT_INTEGRITY.json").write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -124,6 +125,28 @@ class PackageIntegrityTests(unittest.TestCase):
             result = verify_runtime_package_integrity(root)
             self.assertEqual(result["protected_r6_files"], 5)
             self.assertEqual(result["r7_runtime_code_files"], 2)
+
+    def test_causal_producer_manifest_guard_missing_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            manifest_path = root / "R7_R1_PARENT_INTEGRITY.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.pop("causal_r6_producer_ready")
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(IntegrityError, "CAUSAL_R6_PRODUCER_LOCK"):
+                verify_runtime_package_integrity(root)
+
+    def test_causal_producer_manifest_guard_true_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            manifest_path = root / "R7_R1_PARENT_INTEGRITY.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["causal_r6_producer_ready"] = True
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(IntegrityError, "CAUSAL_R6_PRODUCER_LOCK"):
+                verify_runtime_package_integrity(root)
 
     def test_protected_parent_tamper_is_detected(self):
         with tempfile.TemporaryDirectory() as td:
