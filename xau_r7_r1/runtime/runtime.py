@@ -9,8 +9,13 @@ from typing import Any, Dict
 
 from .audit_store import AuditStore
 from .constants import (
-    EXECUTION_UNLOCK_ENV, EXECUTION_UNLOCK_VALUE, HARD_MAX_SPREAD_USD,
-    HARD_MAX_TICK_AGE_SECONDS, R6_BRIDGE_PAUSE_STATE_KEY, VERSION,
+    CAUSAL_R6_PRODUCER_READY,
+    EXECUTION_UNLOCK_ENV,
+    EXECUTION_UNLOCK_VALUE,
+    HARD_MAX_SPREAD_USD,
+    HARD_MAX_TICK_AGE_SECONDS,
+    R6_BRIDGE_PAUSE_STATE_KEY,
+    VERSION,
 )
 from .execution import ExecutionEngine
 from .instance_lock import SingleInstanceLock
@@ -41,7 +46,11 @@ def _finite_number(value: Any, name: str) -> float:
 
 
 def load_config() -> Dict[str, Any]:
-    cfg: Dict[str, Any] = {"max_tick_age_seconds": HARD_MAX_TICK_AGE_SECONDS, "max_spread_usd": HARD_MAX_SPREAD_USD, "request_demo_execution": False}
+    cfg: Dict[str, Any] = {
+        "max_tick_age_seconds": HARD_MAX_TICK_AGE_SECONDS,
+        "max_spread_usd": HARD_MAX_SPREAD_USD,
+        "request_demo_execution": False,
+    }
     if CONFIG_PATH.exists():
         user = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         if not isinstance(user, dict):
@@ -66,7 +75,11 @@ def load_config() -> Dict[str, Any]:
 
 
 def demo_execution_enabled(cfg: Dict[str, Any]) -> bool:
-    return bool(cfg["request_demo_execution"]) and os.environ.get(EXECUTION_UNLOCK_ENV) == EXECUTION_UNLOCK_VALUE
+    return (
+        bool(CAUSAL_R6_PRODUCER_READY)
+        and bool(cfg["request_demo_execution"])
+        and os.environ.get(EXECUTION_UNLOCK_ENV) == EXECUTION_UNLOCK_VALUE
+    )
 
 
 def load_intent(path: Path) -> OrderIntent:
@@ -95,11 +108,37 @@ def _bridge_paused(store: AuditStore) -> bool:
 
 
 def offline_status(store: AuditStore, package_integrity: Dict[str, Any], store_integrity: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
-    return {"version": VERSION, "package_integrity": "PASS", "integrity": package_integrity, "state_integrity": store_integrity, "demo_execution_requested": cfg["request_demo_execution"], "execution_unlocked": demo_execution_enabled(cfg), "raw_intent_send_authority": False, "r6_bridge_root": str(BRIDGE_ROOT), "r6_bridge_paused": _bridge_paused(store), "final_holdout_accessed": False}
+    return {
+        "version": VERSION,
+        "package_integrity": "PASS",
+        "integrity": package_integrity,
+        "state_integrity": store_integrity,
+        "demo_execution_requested": cfg["request_demo_execution"],
+        "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY),
+        "execution_unlocked": demo_execution_enabled(cfg),
+        "raw_intent_send_authority": False,
+        "r6_bridge_root": str(BRIDGE_ROOT),
+        "r6_bridge_paused": _bridge_paused(store),
+        "final_holdout_accessed": False,
+    }
 
 
 def connected_status(store: AuditStore, gateway: MT5Gateway, cfg: Dict[str, Any], package_integrity: Dict[str, Any], store_integrity: Dict[str, Any]) -> Dict[str, Any]:
-    return {"version": VERSION, "package_integrity": "PASS", "integrity": package_integrity, "state_integrity": store_integrity, "execution_unlocked": demo_execution_enabled(cfg), "raw_intent_send_authority": False, "account": gateway.account_snapshot().__dict__, "symbol": gateway.symbol_snapshot().__dict__, "exposure": gateway.exposure_snapshot().__dict__, "r6_bridge_root": str(BRIDGE_ROOT), "r6_bridge_paused": _bridge_paused(store)}
+    return {
+        "version": VERSION,
+        "package_integrity": "PASS",
+        "integrity": package_integrity,
+        "state_integrity": store_integrity,
+        "demo_execution_requested": cfg["request_demo_execution"],
+        "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY),
+        "execution_unlocked": demo_execution_enabled(cfg),
+        "raw_intent_send_authority": False,
+        "account": gateway.account_snapshot().__dict__,
+        "symbol": gateway.symbol_snapshot().__dict__,
+        "exposure": gateway.exposure_snapshot().__dict__,
+        "r6_bridge_root": str(BRIDGE_ROOT),
+        "r6_bridge_paused": _bridge_paused(store),
+    }
 
 
 def main() -> None:
@@ -127,6 +166,7 @@ def main() -> None:
             if args.offline_status:
                 print(json.dumps(offline_status(store, package_integrity, store_integrity, cfg), indent=2, sort_keys=True))
                 return
+
             gateway = MT5Gateway(max_tick_age_seconds=cfg["max_tick_age_seconds"], max_spread_usd=cfg["max_spread_usd"])
             gateway.connect()
             if args.status:
@@ -147,6 +187,8 @@ def main() -> None:
                 print(json.dumps(bridge.clear_pause(args.resume_ack), indent=2, sort_keys=True))
                 return
             if args.process_r6_decision or args.drain_r6_inbox or args.run_r6_inbox:
+                if not CAUSAL_R6_PRODUCER_READY:
+                    raise RuntimeError("CAUSAL_R6_PRODUCER_NOT_ADMITTED: automatic decision execution remains hard-locked")
                 if not execution_enabled:
                     raise RuntimeError("R6_INBOX_DEMO_EXECUTION_LOCKED: automatic decision consumption is disabled until both demo unlocks are present")
             if args.process_r6_decision:
