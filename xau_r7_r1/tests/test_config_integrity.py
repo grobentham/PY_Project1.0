@@ -148,6 +148,16 @@ class PackageIntegrityTests(unittest.TestCase):
             self.assertEqual(result["r7_runtime_code_files"], 2)
             self.assertEqual(result["r7_operator_tool_files"], len(REQUIRED_R7_OPERATOR_FILES))
 
+    def test_shadow_copy_of_protected_source_does_not_confuse_exact_manifest_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            shadow = root / "R7_R1_R6_PRODUCER_SOURCE" / "v16r6" / "engine.py"
+            shadow.parent.mkdir(parents=True, exist_ok=True)
+            shadow.write_text("SOURCE_WORKSPACE_SHADOW=True\n", encoding="utf-8")
+            result = verify_runtime_package_integrity(root)
+            self.assertEqual(result["protected_r6_files"], 5)
+
     def test_causal_producer_manifest_guard_missing_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -184,6 +194,25 @@ class PackageIntegrityTests(unittest.TestCase):
             self.build_fake_package(root)
             (root / "r7_runtime" / "runtime.py").write_text("tampered", encoding="utf-8")
             with self.assertRaises(IntegrityError):
+                verify_runtime_package_integrity(root)
+
+    def test_untracked_runtime_python_file_is_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            (root / "r7_runtime" / "untracked.py").write_text("INJECTED=True\n", encoding="utf-8")
+            with self.assertRaisesRegex(IntegrityError, "R7_RUNTIME_CODE_PATH_SET_MISMATCH"):
+                verify_runtime_package_integrity(root)
+
+    def test_runtime_manifest_path_omission_is_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            manifest_path = root / "R7_R1_PARENT_INTEGRITY.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["r7_runtime_code_sha256"].pop("r7_runtime/runtime.py")
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(IntegrityError, "R7_RUNTIME_CODE_PATH_SET_MISMATCH"):
                 verify_runtime_package_integrity(root)
 
     def test_operator_tool_tamper_is_detected(self):
