@@ -13,7 +13,7 @@ from r7_runtime.r6_producer_parity import ProducerParityError, build_parity_repo
 
 class ProducerParityTests(unittest.TestCase):
     @staticmethod
-    def run(paths):
+    def build_report(paths):
         return build_parity_report(
             paths["reference"],
             paths["producer_stream"],
@@ -29,7 +29,7 @@ class ProducerParityTests(unittest.TestCase):
     def test_exact_full_source_coverage_passes_after_trusted_replay(self):
         with tempfile.TemporaryDirectory() as td:
             paths = build_trusted_fixture(Path(td))
-            report = self.run(paths)
+            report = self.build_report(paths)
             self.assertTrue(report["trusted_producer_replay_pass"])
             self.assertTrue(report["producer_source_policy_pass"])
             self.assertTrue(report["parity_pass"])
@@ -46,14 +46,14 @@ class ProducerParityTests(unittest.TestCase):
             paths = build_trusted_fixture(Path(td))
             paths["bundle"].unlink()
             with self.assertRaisesRegex(ProducerParityError, "SOURCE_BUNDLE_MANIFEST_MISSING"):
-                self.run(paths)
+                self.build_report(paths)
 
     def test_changed_producer_stream_fails_before_parity_comparison(self):
         with tempfile.TemporaryDirectory() as td:
             paths = build_trusted_fixture(Path(td))
             paths["producer_stream"].write_text(paths["producer_stream"].read_text(encoding="utf-8") + "{}\n", encoding="utf-8")
             with self.assertRaisesRegex(ProducerParityError, "PRODUCER_TRUSTED_REPLAY_FAILED"):
-                self.run(paths)
+                self.build_report(paths)
 
     def test_selection_mismatch_in_reference_produces_failing_report(self):
         with tempfile.TemporaryDirectory() as td:
@@ -64,7 +64,7 @@ class ProducerParityTests(unittest.TestCase):
             iso = json.loads(paths["isolation"].read_text(encoding="utf-8"))
             iso["reference_stream_sha256"] = sha256_file(paths["reference"])
             paths["isolation"].write_text(json.dumps(iso), encoding="utf-8")
-            report = self.run(paths)
+            report = self.build_report(paths)
             self.assertFalse(report["parity_pass"])
             self.assertEqual(report["mismatch_count"], 1)
             self.assertFalse(report["signal_selection_parity"])
@@ -78,7 +78,7 @@ class ProducerParityTests(unittest.TestCase):
             iso = json.loads(paths["isolation"].read_text(encoding="utf-8"))
             iso["reference_stream_sha256"] = sha256_file(paths["reference"])
             paths["isolation"].write_text(json.dumps(iso), encoding="utf-8")
-            report = self.run(paths)
+            report = self.build_report(paths)
             self.assertFalse(report["parity_pass"])
             self.assertGreater(report["lookahead_violations"], 0)
 
@@ -89,7 +89,7 @@ class ProducerParityTests(unittest.TestCase):
             iso["future_rows_available_to_producer"] = True
             paths["isolation"].write_text(json.dumps(iso), encoding="utf-8")
             with self.assertRaisesRegex(ProducerParityError, "PARITY_ISOLATION_GUARD_FAILED"):
-                self.run(paths)
+                self.build_report(paths)
 
     def test_isolation_producer_hash_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -98,7 +98,7 @@ class ProducerParityTests(unittest.TestCase):
             iso["producer_stream_sha256"] = "0" * 64
             paths["isolation"].write_text(json.dumps(iso), encoding="utf-8")
             with self.assertRaisesRegex(ProducerParityError, "PARITY_ISOLATION_PRODUCER_HASH_MISMATCH"):
-                self.run(paths)
+                self.build_report(paths)
 
     def test_fixture_set_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -106,7 +106,7 @@ class ProducerParityTests(unittest.TestCase):
             rows = paths["reference"].read_text(encoding="utf-8").splitlines()[:-1]
             paths["reference"].write_text("\n".join(rows) + "\n", encoding="utf-8")
             with self.assertRaisesRegex(ProducerParityError, "PARITY_FIXTURE_SET_MISMATCH"):
-                self.run(paths)
+                self.build_report(paths)
 
     def test_replay_attestation_tamper_fails_before_parity(self):
         with tempfile.TemporaryDirectory() as td:
@@ -115,7 +115,7 @@ class ProducerParityTests(unittest.TestCase):
             replay["deterministic_double_run"] = False
             paths["replay"].write_text(json.dumps(replay), encoding="utf-8")
             with self.assertRaisesRegex(ProducerParityError, "PRODUCER_TRUSTED_REPLAY_FAILED"):
-                self.run(paths)
+                self.build_report(paths)
 
 
 if __name__ == "__main__":
