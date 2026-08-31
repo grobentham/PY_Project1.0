@@ -10,6 +10,7 @@ from r7_runtime.constants import CANONICAL_R6_ZIP_SHA256
 from r7_runtime.r6_integrity import sha256_file
 from r7_runtime.r6_producer_seal import (
     ALLOWED_CANDIDATE_FILES,
+    GENERATED_SEAL_FILENAME,
     PRODUCER_MODULE_RELATIVE,
     ProducerSealError,
     seal_candidate,
@@ -50,6 +51,14 @@ class ProducerSealTests(unittest.TestCase):
             else:
                 path.write_text("def produce(prefix):\n    return prefix\n", encoding="utf-8")
 
+    def admission(self):
+        return {
+            "admission_version": "TEST_ADMISSION",
+            "ready": True,
+            "final_holdout_accessed": False,
+            "strategy_retuned": False,
+        }
+
     def test_valid_candidate_is_sealed_in_isolated_copy_without_baseline_mutation(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td) / "baseline"
@@ -59,13 +68,7 @@ class ProducerSealTests(unittest.TestCase):
             self.build_candidate(candidate)
             before_parent = sha256_file(base / "R7_R1_PARENT_INTEGRITY.json")
 
-            admission = {
-                "admission_version": "TEST_ADMISSION",
-                "ready": True,
-                "final_holdout_accessed": False,
-                "strategy_retuned": False,
-            }
-            with mock.patch("r7_runtime.r6_producer_seal.verify_producer_admission", return_value=admission) as verify:
+            with mock.patch("r7_runtime.r6_producer_seal.verify_producer_admission", return_value=self.admission()) as verify:
                 result = seal_candidate(base, candidate)
 
             self.assertTrue(result["admission_ready"])
@@ -79,6 +82,20 @@ class ProducerSealTests(unittest.TestCase):
             verify.assert_called_once()
             staging_root = Path(verify.call_args.args[0])
             self.assertNotEqual(staging_root, base)
+
+    def test_existing_generated_seal_is_ignored_for_repeatable_reseal(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "baseline"
+            candidate = Path(td) / "candidate"
+            base.mkdir(); candidate.mkdir()
+            self.build_baseline(base)
+            self.build_candidate(candidate)
+            old_seal = candidate / GENERATED_SEAL_FILENAME
+            old_seal.write_text('{"old":true}\n', encoding="utf-8")
+            with mock.patch("r7_runtime.r6_producer_seal.verify_producer_admission", return_value=self.admission()):
+                result = seal_candidate(base, candidate)
+            self.assertNotIn(GENERATED_SEAL_FILENAME, result["candidate_files_sha256"])
+            self.assertTrue(old_seal.is_file())
 
     def test_unexpected_candidate_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
