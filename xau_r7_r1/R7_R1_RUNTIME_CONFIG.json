@@ -1,0 +1,6 @@
+{
+  "max_tick_age_seconds": 5.0,
+  "max_spread_usd": 1.0,
+  "request_demo_execution": false,
+  "_note": "Only restrictive operational settings are configurable. Frozen R6 risk/strategy values and demo-only protection are hard-coded."
+}
