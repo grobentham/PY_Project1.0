@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .constants import CANONICAL_R6_ZIP_SHA256, RETIRED_SOURCE, R6_SOURCE_PRIORITY
 from .r6_integrity import sha256_file
@@ -188,9 +187,9 @@ def verify_parity_evidence(
 def verify_producer_admission(
     root: Path,
     *,
-    parent_manifest_path: Path | None = None,
-    source_probe_path: Path | None = None,
-    parity_path: Path | None = None,
+    parent_manifest_path: Optional[Path] = None,
+    source_probe_path: Optional[Path] = None,
+    parity_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
     parent_manifest_path = parent_manifest_path or root / "R7_R1_PARENT_INTEGRITY.json"
@@ -216,8 +215,7 @@ def verify_producer_admission(
 
 def producer_admission_status(root: Path) -> Dict[str, Any]:
     try:
-        result = verify_producer_admission(root)
-        return result
+        return verify_producer_admission(root)
     except Exception as exc:
         return {
             "admission_version": ADMISSION_VERSION,
