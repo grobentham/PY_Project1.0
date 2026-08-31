@@ -32,6 +32,19 @@ function Resolve-RuntimeToolSource {
     Fail 'R7 runtime tool source not found. Expected runtime\ or r7_runtime\ beside this script.'
 }
 
+function Assert-PackagedSelfIntegrity($Python) {
+    $Manifest = Join-Path $Here 'R7_R1_PARENT_INTEGRITY.json'
+    if (!(Test-Path -LiteralPath $Manifest -PathType Leaf)) { return }
+    Push-Location $Here
+    try {
+        Invoke-Python $Python @(
+            '-c',
+            'from pathlib import Path; from r7_runtime.r6_integrity import verify_runtime_package_integrity; verify_runtime_package_integrity(Path.cwd())'
+        )
+    }
+    finally { Pop-Location }
+}
+
 if (!(Test-Path -LiteralPath $ParentZip -PathType Leaf)) {
     Fail ("put {0} beside this script" -f $CanonicalName)
 }
@@ -43,6 +56,7 @@ if ($actual -ne $CanonicalSha256) {
 
 $Python = Find-Python
 $RuntimeSource = Resolve-RuntimeToolSource
+Assert-PackagedSelfIntegrity $Python
 New-Item -ItemType Directory -Path $Extract -Force | Out-Null
 
 try {
