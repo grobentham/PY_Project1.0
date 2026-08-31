@@ -20,6 +20,16 @@ $ProtectedSuffixes = @(
     'V16_R6_FINAL_HOLDOUT_PREREGISTRATION.json'
 )
 
+$OperatorToolCopies = @(
+    [pscustomobject]@{ Source = 'PROBE_CANONICAL_R6_SOURCE.ps1'; Destination = 'PROBE_CANONICAL_R6_SOURCE.ps1' },
+    [pscustomobject]@{ Source = 'EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1'; Destination = 'EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1' },
+    [pscustomobject]@{ Source = 'SEAL_R6_PRODUCER_CANDIDATE.ps1'; Destination = 'SEAL_R6_PRODUCER_CANDIDATE.ps1' },
+    [pscustomobject]@{ Source = 'PRECHECK_R6_FUSED_RELEASE.ps1'; Destination = 'PRECHECK_R6_FUSED_RELEASE.ps1' },
+    [pscustomobject]@{ Source = 'PACKAGE_README.md'; Destination = 'R7_R1_PACKAGE_README.md' },
+    [pscustomobject]@{ Source = 'REPAIR_AUDIT.md'; Destination = 'R7_R1_REPAIR_AUDIT.md' }
+)
+$PackagedOperatorFiles = @($OperatorToolCopies | ForEach-Object { [string]$_.Destination })
+
 function Fail([string]$Message) { throw ('R7-R1 BUILD BLOCKED: ' + $Message) }
 function Write-Utf8NoBom([string]$Path, [string]$Text) { [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false))) }
 function Get-Rel([string]$Base, [string]$Path) { return $Path.Substring($Base.Length).TrimStart([char]'\',[char]'/').Replace('\','/') }
@@ -55,6 +65,16 @@ function Get-R7RuntimeCodeHashes([string]$Root) {
     $launcher = Join-Path $Root 'START_XAU.bat'
     if (!(Test-Path -LiteralPath $launcher -PathType Leaf)) { Fail 'R7-R1 START_XAU.bat missing' }
     $map['START_XAU.bat'] = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant()
+    return $map
+}
+
+function Get-R7OperatorToolHashes([string]$Root) {
+    $map = [ordered]@{}
+    foreach ($rel in $PackagedOperatorFiles) {
+        $path = Join-Path $Root ($rel.Replace('/','\'))
+        if (!(Test-Path -LiteralPath $path -PathType Leaf)) { Fail ('packaged operator file missing: ' + $rel) }
+        $map[$rel] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
     return $map
 }
 
@@ -143,6 +163,14 @@ try {
     Copy-Item -LiteralPath (Join-Path $Here 'R7_R1_RUNTIME_CONFIG.json') -Destination (Join-Path $Extract 'R7_R1_RUNTIME_CONFIG.json') -Force
     Copy-Item -LiteralPath (Join-Path $Here 'START_XAU_R7_R1.bat.template') -Destination (Join-Path $Extract 'START_XAU.bat') -Force
 
+    foreach ($copy in $OperatorToolCopies) {
+        $source = Join-Path $Here ([string]$copy.Source)
+        $destinationRel = [string]$copy.Destination
+        if (!(Test-Path -LiteralPath $source -PathType Leaf)) { Fail ('operator source file missing: ' + [string]$copy.Source) }
+        if ($parentTree.Keys -contains $destinationRel) { Fail ('operator destination conflicts with inherited R6 file: ' + $destinationRel) }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $Extract $destinationRel) -Force
+    }
+
     Verify-InheritedTree $Extract $parentTree
     $protectedAfter = Get-ProtectedHashes $Extract
     foreach ($entry in (Get-MapEntries $protected)) {
@@ -152,6 +180,7 @@ try {
     if ($frozenLauncherHash -ne $originalLauncherHash) { Fail 'preserved R6 launcher bytes do not match original launcher hash' }
 
     $r7RuntimeHashes = Get-R7RuntimeCodeHashes $Extract
+    $r7OperatorHashes = Get-R7OperatorToolHashes $Extract
     $manifest = [ordered]@{
         version = 'V16_R7_R1_FULL_RUNTIME_REPAIR'
         canonical_parent_zip = $CanonicalName
@@ -160,6 +189,7 @@ try {
         parent_tree_sha256 = $parentTree
         protected_r6_hashes = $protected
         r7_runtime_code_sha256 = $r7RuntimeHashes
+        r7_operator_tool_sha256 = $r7OperatorHashes
         original_start_xau_sha256 = $originalLauncherHash
         allowed_inherited_change = @('START_XAU.bat')
         final_holdout_accessed = $false
@@ -185,6 +215,7 @@ try {
         inherited_parent_files_verified = $true
         protected_r6_files_verified = $true
         r7_runtime_code_verified = $true
+        r7_operator_tools_verified = $true
         original_launcher_preserved = $true
         python_compile_pass = $true
         unit_tests_pass = $true
@@ -215,6 +246,7 @@ try {
         if ([string]$verifyProtected[$prop.Name] -ne [string]$prop.Value) { Fail ('extracted ZIP protected hash mismatch: ' + $prop.Name) }
     }
     Verify-HashMap $Verify $verifyManifest.r7_runtime_code_sha256 'extracted R7 runtime'
+    Verify-HashMap $Verify $verifyManifest.r7_operator_tool_sha256 'extracted R7 operator tool'
     $verifyFrozenHash = (Get-FileHash -LiteralPath (Join-Path $Verify 'r7_runtime\frozen_parent\START_XAU_R6_ORIGINAL.bat.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($verifyFrozenHash -ne [string]$verifyManifest.original_start_xau_sha256) { Fail 'extracted ZIP frozen launcher hash mismatch' }
 
