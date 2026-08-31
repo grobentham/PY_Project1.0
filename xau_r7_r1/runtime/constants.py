@@ -35,6 +35,12 @@ EXECUTION_UNLOCK_ENV = "XAU_R7_R1_ENABLE_DEMO_EXECUTION"
 EXECUTION_UNLOCK_VALUE = "YES_I_ACCEPT_DEMO_ONLY"
 R6_EXECUTION_AUTHORITY = "FROZEN_R6_ADMITTED_DECISION_V1"
 
+# Critical readiness lock. The execution engine can be exercised by offline
+# regression tests, but the packaged runtime must not send a hand-crafted JSON
+# merely because it passes the admitted-decision shape checks. Flip this only
+# in a successor that contains and verifies the exact causal frozen-R6 producer.
+CAUSAL_R6_PRODUCER_READY = False
+
 # Frozen bridge contract. R7-R1 consumes an already-admitted R6 decision and
 # never re-selects or retunes the strategy.
 R6_DECISION_SCHEMA = "V16_R6_ADMITTED_DECISION_V1"
