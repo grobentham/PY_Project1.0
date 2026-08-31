@@ -320,9 +320,6 @@ class MT5Gateway:
             raise GatewayError("OWNED_POSITION_STOP_ALREADY_AT_OR_THROUGH_MARKET")
         if side == "SELL" and position.sl <= current_exit:
             raise GatewayError("OWNED_POSITION_STOP_ALREADY_AT_OR_THROUGH_MARKET")
-        # Current equity already reflects entry-side costs and current P/L. The
-        # remaining-to-stop estimate therefore adds only an exit-side half of
-        # the frozen round-trip commission assumption.
         return self._calc_stop_loss(side, position.volume, current_exit, position.sl, commission_fraction=0.5)
 
     def _select_filling_mode(self) -> int:
@@ -366,7 +363,13 @@ class MT5Gateway:
 
     def order_check(self, request: Dict):
         mt5 = self._require()
-        side = "BUY" if int(request.get("type", -1)) == int(mt5.ORDER_TYPE_BUY) else "SELL"
+        request_type = int(request.get("type", -1))
+        if request_type == int(mt5.ORDER_TYPE_BUY):
+            side = "BUY"
+        elif request_type == int(mt5.ORDER_TYPE_SELL):
+            side = "SELL"
+        else:
+            raise GatewayError("ORDER_CHECK_REQUEST_TYPE_INVALID")
         self.assert_trading_permissions(side)
         check = mt5.order_check(request)
         if check is None:
@@ -375,15 +378,32 @@ class MT5Gateway:
             raise GatewayError(f"ORDER_CHECK_REJECTED:{check.retcode}:{check.comment}")
         return check
 
+    def order_send_state(self, result) -> str:
+        mt5 = self._require()
+        retcode = int(getattr(result, "retcode", -1))
+        if retcode == int(mt5.TRADE_RETCODE_DONE):
+            return "DONE"
+        if retcode == int(mt5.TRADE_RETCODE_PLACED):
+            return "PLACED"
+        if retcode == int(mt5.TRADE_RETCODE_DONE_PARTIAL):
+            return "DONE_PARTIAL"
+        return "UNACCEPTED"
+
     def order_send(self, request: Dict):
         mt5 = self._require()
-        side = "BUY" if int(request.get("type", -1)) == int(mt5.ORDER_TYPE_BUY) else "SELL"
+        request_type = int(request.get("type", -1))
+        if request_type == int(mt5.ORDER_TYPE_BUY):
+            side = "BUY"
+        elif request_type == int(mt5.ORDER_TYPE_SELL):
+            side = "SELL"
+        else:
+            raise GatewayError("ORDER_SEND_REQUEST_TYPE_INVALID")
         self.assert_trading_permissions(side)
         result = mt5.order_send(request)
         if result is None:
             raise GatewayError(f"ORDER_SEND_NONE:{mt5.last_error()}")
-        allowed = {int(mt5.TRADE_RETCODE_DONE), int(mt5.TRADE_RETCODE_PLACED), int(mt5.TRADE_RETCODE_DONE_PARTIAL)}
-        if int(result.retcode) not in allowed:
+        state = self.order_send_state(result)
+        if state == "UNACCEPTED":
             raise GatewayError(f"ORDER_SEND_REJECTED:{result.retcode}:{result.comment}")
         return result
 
