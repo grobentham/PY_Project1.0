@@ -24,6 +24,10 @@ function Fail([string]$Message) {
     throw ('R7-R1 BUILD BLOCKED: ' + $Message)
 }
 
+function Write-Utf8NoBom([string]$Path, [string]$Text) {
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function Get-Rel([string]$Base, [string]$Path) {
     return $Path.Substring($Base.Length).TrimStart([char]'\',[char]'/').Replace('\','/')
 }
@@ -53,8 +57,22 @@ function Get-ProtectedHashes([string]$Root) {
     return $map
 }
 
+function Get-MapEntries($Expected) {
+    if ($Expected -is [System.Collections.IDictionary]) {
+        return @($Expected.GetEnumerator() | ForEach-Object {
+            [pscustomobject]@{ Key = [string]$_.Key; Value = [string]$_.Value }
+        })
+    }
+    if ($null -ne $Expected -and $null -ne $Expected.PSObject) {
+        return @($Expected.PSObject.Properties | ForEach-Object {
+            [pscustomobject]@{ Key = [string]$_.Name; Value = [string]$_.Value }
+        })
+    }
+    Fail 'expected hash map is neither IDictionary nor PSCustomObject'
+}
+
 function Verify-InheritedTree([string]$Root, $Expected) {
-    foreach ($entry in $Expected.GetEnumerator()) {
+    foreach ($entry in (Get-MapEntries $Expected)) {
         $rel = [string]$entry.Key
         if ($rel -ieq 'START_XAU.bat') { continue }
         $path = Join-Path $Root ($rel.Replace('/','\'))
@@ -136,14 +154,14 @@ try {
         demo_only = $true
         execution_enabled_by_default = $false
     }
-    $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Extract 'R7_R1_PARENT_INTEGRITY.json') -Encoding UTF8
+    Write-Utf8NoBom (Join-Path $Extract 'R7_R1_PARENT_INTEGRITY.json') ($manifest | ConvertTo-Json -Depth 12)
 
     Copy-Item -LiteralPath (Join-Path $Here 'START_XAU_R7_R1.bat.template') -Destination (Join-Path $Extract 'START_XAU.bat') -Force
 
     # Verify every inherited parent file is still byte-identical except the intentionally replaced launcher.
     Verify-InheritedTree $Extract $parentTree
     $protectedAfter = Get-ProtectedHashes $Extract
-    foreach ($entry in $protected.GetEnumerator()) {
+    foreach ($entry in (Get-MapEntries $protected)) {
         if ([string]$protectedAfter[$entry.Key] -ne [string]$entry.Value) {
             Fail ('protected R6 strategy/policy file changed: ' + [string]$entry.Key)
         }
@@ -178,7 +196,7 @@ try {
         final_holdout_accessed = $false
         strategy_retuned = $false
     }
-    $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Extract 'R7_R1_BUILD_VERIFICATION.json') -Encoding UTF8
+    Write-Utf8NoBom (Join-Path $Extract 'R7_R1_BUILD_VERIFICATION.json') ($verification | ConvertTo-Json -Depth 8)
 
     # Remove only transient state created by offline verification.
     Get-ChildItem -LiteralPath (Join-Path $Extract 'runtime') -ErrorAction SilentlyContinue | Where-Object {
