@@ -3,11 +3,11 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import asdict, replace
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .audit_store import AuditStore
 from .constants import MAX_CANONICAL_LOT, R6_EXECUTION_AUTHORITY
-from .models import BrokerMatch, OrderIntent
+from .models import AccountSnapshot, BrokerMatch, OrderIntent
 from .r6_decision_adapter import round_price_to_point
 from .risk import RiskGovernor
 
@@ -118,9 +118,13 @@ class ExecutionEngine:
         detail = asdict(exposure)
         if exposure.total_lot > MAX_CANONICAL_LOT + 1e-12:
             return {"ok": False, "reason": "POST_SEND_MAX_EXPOSURE_BREACH", "exposure": detail}
-        if match.kind in {"POSITION", "ORDER"}:
-            if exposure.total_count != 1:
+        if match.kind == "POSITION":
+            if exposure.position_count != 1 or exposure.pending_order_count != 0 or exposure.total_count != 1:
                 return {"ok": False, "reason": "POST_SEND_EXPOSURE_COUNT_MISMATCH", "exposure": detail}
+        elif match.kind == "ORDER":
+            # A market request that remains as an order has unresolved fill state.
+            # Never mark it ACKNOWLEDGED; containment will cancel the owned order.
+            return {"ok": False, "reason": "POST_SEND_PENDING_ORDER_NOT_SAFE_TO_ACK", "exposure": detail}
         elif match.kind == "DEAL":
             if exposure.total_count != 0:
                 return {"ok": False, "reason": "POST_SEND_UNEXPECTED_XAU_EXPOSURE", "exposure": detail}
@@ -128,23 +132,199 @@ class ExecutionEngine:
             return {"ok": False, "reason": "POST_SEND_UNKNOWN_BROKER_MATCH_KIND", "exposure": detail}
         return {"ok": True, "exposure": detail}
 
+    def _expected_payload(self, intent_id: str) -> Dict[str, Any]:
+        row = self.store.get_intent(intent_id)
+        if row is None or not isinstance(row.get("payload"), dict):
+            raise ExecutionError("INTENT_PAYLOAD_MISSING_DURING_RECONCILIATION")
+        return row["payload"]
+
+    @staticmethod
+    def _account_from_detail(base_detail: Dict[str, Any]) -> Optional[AccountSnapshot]:
+        raw = base_detail.get("pre_send_account")
+        if not isinstance(raw, dict):
+            return None
+        required = {"login", "server", "currency", "equity_sgd", "balance_sgd", "margin_free_sgd"}
+        if not required.issubset(raw):
+            return None
+        try:
+            values = [float(raw["equity_sgd"]), float(raw["balance_sgd"]), float(raw["margin_free_sgd"])]
+            if not all(math.isfinite(v) for v in values):
+                return None
+            return AccountSnapshot(
+                login=int(raw["login"]),
+                server=str(raw["server"]),
+                currency=str(raw["currency"]),
+                equity_sgd=values[0],
+                balance_sgd=values[1],
+                margin_free_sgd=values[2],
+            )
+        except Exception:
+            return None
+
+    def _filled_position_safety(self, intent_id: str, *, base_detail: Dict[str, Any]) -> Dict[str, Any]:
+        payload = self._expected_payload(intent_id)
+        expected_side = str(payload.get("side", "")).upper()
+        try:
+            expected_lot = float(payload["lot"])
+        except Exception as exc:
+            raise ExecutionError("INTENT_EXPECTED_LOT_INVALID") from exc
+        if expected_side not in {"BUY", "SELL"} or not math.isfinite(expected_lot) or expected_lot <= 0:
+            raise ExecutionError("INTENT_EXPECTED_FILL_CONTRACT_INVALID")
+
+        owned_orders = self.gateway.owned_orders(intent_id)
+        if owned_orders:
+            return {
+                "ok": False,
+                "reason": "PARTIAL_OR_PENDING_FILL_REMAINDER",
+                "owned_pending_orders": [int(o.ticket) for o in owned_orders],
+            }
+        position = self.gateway.owned_position(intent_id)
+        if position is None:
+            return {"ok": False, "reason": "OWNED_POSITION_NOT_FOUND_AFTER_POSITION_MATCH"}
+        if position.side.upper() != expected_side:
+            return {
+                "ok": False,
+                "reason": "ACTUAL_FILL_SIDE_MISMATCH",
+                "expected_side": expected_side,
+                "actual_side": position.side,
+            }
+        if abs(float(position.volume) - expected_lot) > 1e-9:
+            return {
+                "ok": False,
+                "reason": "ACTUAL_FILL_VOLUME_MISMATCH",
+                "expected_lot": expected_lot,
+                "actual_lot": float(position.volume),
+            }
+        if float(position.sl) <= 0:
+            return {"ok": False, "reason": "ACTUAL_POSITION_STOP_MISSING"}
+        if float(position.tp) <= 0:
+            return {"ok": False, "reason": "ACTUAL_POSITION_TARGET_MISSING"}
+        if expected_side == "BUY" and not (float(position.sl) < float(position.price_open) < float(position.tp)):
+            return {"ok": False, "reason": "ACTUAL_LONG_PROTECTIVE_GEOMETRY_INVALID"}
+        if expected_side == "SELL" and not (float(position.tp) < float(position.price_open) < float(position.sl)):
+            return {"ok": False, "reason": "ACTUAL_SHORT_PROTECTIVE_GEOMETRY_INVALID"}
+
+        pre_send_account = self._account_from_detail(base_detail)
+        if pre_send_account is not None:
+            # Immediate acknowledgement: evaluate the actual broker fill-to-stop
+            # loss against the account equity that authorized the send.
+            risk_account = pre_send_account
+            stop_loss_sgd = self.gateway.position_stop_loss_sgd(position)
+            risk_basis = "PRE_SEND_EQUITY_ACTUAL_FILL_TO_STOP"
+        else:
+            # Restart/pre-existing reconciliation has no trustworthy pre-send
+            # snapshot. Use current equity and remaining market-to-stop loss.
+            risk_account = self.gateway.account_snapshot()
+            stop_loss_sgd = self.gateway.position_remaining_stop_loss_sgd(position)
+            risk_basis = "CURRENT_EQUITY_REMAINING_TO_STOP"
+
+        decision = self.risk.evaluate_filled_position(
+            account=risk_account,
+            position=position,
+            projected_stop_loss_sgd=stop_loss_sgd,
+        )
+        return {
+            "ok": bool(decision.allowed),
+            "reason": decision.reason,
+            "risk_basis": risk_basis,
+            "position": asdict(position),
+            "risk_account": asdict(risk_account),
+            "risk": asdict(decision.risk),
+        }
+
+    def _manual_review_with_containment(
+        self,
+        intent_id: str,
+        match: BrokerMatch,
+        *,
+        reason: str,
+        detail: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        containment: Dict[str, Any]
+        try:
+            containment = self.gateway.emergency_flatten_owned_intent(intent_id)
+        except Exception as exc:
+            containment = {"ok": False, "error": f"EMERGENCY_CONTAINMENT_EXCEPTION:{exc}"}
+        final_detail = dict(detail)
+        final_detail.update({
+            "broker_match": asdict(match),
+            "containment": containment,
+            "automatic_resubmit": False,
+        })
+        self.store.append_event(
+            "UNSAFE_POST_SEND_CONTAINMENT",
+            {
+                "client_intent_id": intent_id,
+                "reason": reason,
+                "broker_match": asdict(match),
+                "containment": containment,
+            },
+        )
+        self.store.transition(
+            intent_id,
+            "MANUAL_REVIEW_NO_RESUBMIT",
+            broker_ticket=match.ticket,
+            error=reason,
+            detail=final_detail,
+        )
+        return {
+            "ok": False,
+            "state": "MANUAL_REVIEW_NO_RESUBMIT",
+            "reason": reason,
+            "broker_match": asdict(match),
+            "containment": containment,
+        }
+
     def _acknowledge_or_manual(self, intent_id: str, match: BrokerMatch, *, base_detail: Dict[str, Any]) -> Dict[str, Any]:
         try:
             post = self._post_send_exposure_ok(match)
         except Exception as exc:
-            self.store.transition(
-                intent_id, "MANUAL_REVIEW_NO_RESUBMIT", broker_ticket=match.ticket,
-                error=f"POST_SEND_EXPOSURE_QUERY_FAILED:{exc}",
-                detail={**base_detail, "broker_match": asdict(match), "automatic_resubmit": False},
+            return self._manual_review_with_containment(
+                intent_id,
+                match,
+                reason=f"POST_SEND_EXPOSURE_QUERY_FAILED:{exc}",
+                detail=base_detail,
             )
-            return {"ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": f"POST_SEND_EXPOSURE_QUERY_FAILED:{exc}", "broker_match": asdict(match)}
+
         detail = dict(base_detail)
         detail.update({"broker_kind": match.kind, "broker_state": match.state, "post_send": post})
         if not post["ok"]:
-            self.store.transition(intent_id, "MANUAL_REVIEW_NO_RESUBMIT", broker_ticket=match.ticket, error=post["reason"], detail=detail)
-            return {"ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": post["reason"], "broker_match": asdict(match), "post_send": post}
+            return self._manual_review_with_containment(
+                intent_id,
+                match,
+                reason=post["reason"],
+                detail=detail,
+            )
+
+        if match.kind == "POSITION":
+            try:
+                fill_safety = self._filled_position_safety(intent_id, base_detail=base_detail)
+            except Exception as exc:
+                return self._manual_review_with_containment(
+                    intent_id,
+                    match,
+                    reason=f"ACTUAL_FILL_SAFETY_CHECK_FAILED:{exc}",
+                    detail=detail,
+                )
+            detail["actual_fill_safety"] = fill_safety
+            if not fill_safety["ok"]:
+                return self._manual_review_with_containment(
+                    intent_id,
+                    match,
+                    reason="ACTUAL_FILL_UNSAFE:" + str(fill_safety["reason"]),
+                    detail=detail,
+                )
+
+        # DEAL + zero XAU exposure means there is no remaining position/order to
+        # contain. POSITION is acknowledged only after the actual-fill gate above.
         self.store.transition(intent_id, "ACKNOWLEDGED", broker_ticket=match.ticket, detail=detail)
-        return {"ok": True, "state": "ACKNOWLEDGED", "broker_match": asdict(match), "post_send": post}
+        return {
+            "ok": True,
+            "state": "ACKNOWLEDGED",
+            "broker_match": asdict(match),
+            "post_send": post,
+            **({"actual_fill_safety": detail["actual_fill_safety"]} if "actual_fill_safety" in detail else {}),
+        }
 
     def _find_broker_match_fail_closed(self, intent_id: str, *, after_send: bool) -> BrokerMatch:
         try:
@@ -213,18 +393,34 @@ class ExecutionEngine:
             return {"ok": False, "state": "ABANDONED_BEFORE_SEND", "reason": str(exc)}
 
         self.store.transition(intent.client_intent_id, "SUBMITTING", detail={"entry_price": second["request"]["price"], "geometry": second["effective_geometry"]})
+        send_detail = {
+            "pre_send_account": second["account"],
+            "submitted_request": second["request"],
+            "submitted_geometry": second["effective_geometry"],
+        }
         try:
             result = self.gateway.order_send(second["request"])
             ticket = int(getattr(result, "order", 0) or getattr(result, "deal", 0) or 0) or None
-            self.store.transition(intent.client_intent_id, "SUBMITTED", broker_ticket=ticket)
+            send_detail.update({
+                "order_send_retcode": int(getattr(result, "retcode", 0) or 0),
+                "order_send_order": int(getattr(result, "order", 0) or 0),
+                "order_send_deal": int(getattr(result, "deal", 0) or 0),
+                "order_send_volume": float(getattr(result, "volume", 0.0) or 0.0),
+                "order_send_price": float(getattr(result, "price", 0.0) or 0.0),
+            })
+            self.store.transition(intent.client_intent_id, "SUBMITTED", broker_ticket=ticket, detail=send_detail)
         except Exception as send_exc:
             try:
                 match = self._find_broker_match_fail_closed(intent.client_intent_id, after_send=True)
             except ExecutionError as reconcile_exc:
                 return {"ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": str(reconcile_exc), "send_error": str(send_exc)}
             if match.found:
-                return self._acknowledge_or_manual(intent.client_intent_id, match, base_detail={"recovered_after_send_exception": True, "send_error": str(send_exc)})
-            self.store.transition(intent.client_intent_id, "MANUAL_REVIEW_NO_RESUBMIT", error=str(send_exc), detail={"automatic_resubmit": False})
+                return self._acknowledge_or_manual(
+                    intent.client_intent_id,
+                    match,
+                    base_detail={**send_detail, "recovered_after_send_exception": True, "send_error": str(send_exc)},
+                )
+            self.store.transition(intent.client_intent_id, "MANUAL_REVIEW_NO_RESUBMIT", error=str(send_exc), detail={**send_detail, "automatic_resubmit": False})
             return {"ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": str(send_exc)}
 
         try:
@@ -232,8 +428,16 @@ class ExecutionEngine:
         except ExecutionError as exc:
             return {"ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": str(exc)}
         if match.found:
-            return self._acknowledge_or_manual(intent.client_intent_id, match, base_detail={"order_send_returned_success": True})
-        self.store.transition(intent.client_intent_id, "MANUAL_REVIEW_NO_RESUBMIT", detail={"order_send_returned_success": True, "broker_match_found": False, "automatic_resubmit": False})
+            return self._acknowledge_or_manual(
+                intent.client_intent_id,
+                match,
+                base_detail={**send_detail, "order_send_returned_success": True},
+            )
+        self.store.transition(
+            intent.client_intent_id,
+            "MANUAL_REVIEW_NO_RESUBMIT",
+            detail={**send_detail, "order_send_returned_success": True, "broker_match_found": False, "automatic_resubmit": False},
+        )
         return {"ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": "BROKER_ACK_NOT_RECONCILED"}
 
     def recover_inflight(self) -> List[Dict[str, Any]]:
