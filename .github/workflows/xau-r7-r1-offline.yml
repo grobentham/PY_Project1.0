@@ -50,19 +50,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Parse Windows builder and launcher template
+      - name: Parse Windows builders and launcher template
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $errors = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path 'xau_r7_r1/BUILD_R7_R1.ps1'),
-            [ref]$null,
-            [ref]$errors
-          )
-          if ($errors.Count -ne 0) {
-            $errors | ForEach-Object { Write-Error $_.Message }
-            throw 'BUILD_R7_R1.ps1 contains PowerShell parse errors'
+          foreach ($script in @('xau_r7_r1/BUILD_R7_R1.ps1','xau_r7_r1/PROBE_CANONICAL_R6_SOURCE.ps1')) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$null,
+              [ref]$errors
+            )
+            if ($errors.Count -ne 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              throw ($script + ' contains PowerShell parse errors')
+            }
           }
           if (-not (Test-Path 'xau_r7_r1/START_XAU_R7_R1.bat.template' -PathType Leaf)) {
             throw 'START_XAU_R7_R1.bat.template missing'
