@@ -4,6 +4,7 @@ import argparse
 import ast
 import builtins
 import copy
+import hashlib
 import inspect
 import json
 import math
@@ -17,93 +18,27 @@ class ProducerReplayError(RuntimeError):
     pass
 
 
-REPLAY_VERSION = "R7_R1_R6_PRODUCER_REPLAY_V1"
-SOURCE_POLICY_VERSION = "R7_R1_R6_PRODUCER_SOURCE_POLICY_V1"
+REPLAY_VERSION = "R7_R1_R6_PRODUCER_REPLAY_V2"
+SOURCE_POLICY_VERSION = "R7_R1_R6_PRODUCER_SOURCE_POLICY_V2"
 FIXTURE_SCHEMA = "V16_R6_CAUSAL_PRODUCER_FIXTURE_V1"
 PRODUCER_ENTRYPOINT = "produce"
 MAX_FIXTURE_FILE_BYTES = 64 * 1024 * 1024
 
-_ALLOWED_IMPORT_ROOTS = frozenset({
-    "collections",
-    "copy",
-    "dataclasses",
-    "datetime",
-    "decimal",
-    "enum",
-    "fractions",
-    "functools",
-    "itertools",
-    "json",
-    "math",
-    "numpy",
-    "operator",
-    "pandas",
-    "sklearn",
-    "statistics",
-    "typing",
-})
-_FORBIDDEN_IMPORT_ROOTS = frozenset({
-    "builtins",
-    "ftplib",
-    "glob",
-    "http",
-    "importlib",
-    "joblib",
-    "os",
-    "pathlib",
-    "pickle",
-    "requests",
-    "shelve",
-    "shutil",
-    "socket",
-    "sqlite3",
-    "subprocess",
-    "sys",
-    "tempfile",
-    "urllib",
+# The candidate is deliberately import-free. Exact frozen behavior must be
+# expressed as a pure transformation of the supplied causal input. This keeps
+# replay verification independent of filesystem, network, environment, clock,
+# broker, model-file and dynamically imported state.
+_SAFE_BUILTIN_NAMES = frozenset({
+    "abs", "all", "any", "bool", "dict", "enumerate", "float", "int",
+    "len", "list", "max", "min", "pow", "range", "reversed", "round",
+    "set", "sorted", "str", "sum", "tuple", "zip",
+    "ArithmeticError", "Exception", "KeyError", "TypeError", "ValueError",
 })
 _FORBIDDEN_CALL_NAMES = frozenset({
-    "__import__",
-    "breakpoint",
-    "compile",
-    "delattr",
-    "dir",
-    "eval",
-    "exec",
-    "getattr",
-    "globals",
-    "help",
-    "input",
-    "locals",
-    "open",
-    "setattr",
-    "vars",
+    "__import__", "breakpoint", "compile", "delattr", "dir", "eval", "exec",
+    "getattr", "globals", "help", "input", "locals", "open", "setattr",
+    "vars", "memoryview",
 })
-_FORBIDDEN_ATTRIBUTE_CALL_SUFFIXES = (
-    ".open",
-    ".read_bytes",
-    ".read_csv",
-    ".read_excel",
-    ".read_feather",
-    ".read_hdf",
-    ".read_json",
-    ".read_orc",
-    ".read_parquet",
-    ".read_pickle",
-    ".read_sql",
-    ".read_table",
-    ".read_text",
-    ".to_csv",
-    ".to_excel",
-    ".to_feather",
-    ".to_hdf",
-    ".to_json",
-    ".to_orc",
-    ".to_parquet",
-    ".to_pickle",
-    ".write_bytes",
-    ".write_text",
-)
 _FORBIDDEN_STRING_TOKENS = (
     "final_holdout",
     "research_consumed_validation",
@@ -121,17 +56,6 @@ _PROHIBITED_INPUT_KEY_TOKENS = (
     "validation_result",
 )
 _REQUIRED_FIXTURE_FIELDS = frozenset({"schema", "fixture_id", "available_through_ms", "producer_input"})
-
-
-def _dotted_name(node: ast.AST) -> str:
-    parts: List[str] = []
-    current: ast.AST = node
-    while isinstance(current, ast.Attribute):
-        parts.append(current.attr)
-        current = current.value
-    if isinstance(current, ast.Name):
-        parts.append(current.id)
-    return ".".join(reversed(parts))
 
 
 def _literal_only(node: ast.AST) -> bool:
@@ -156,11 +80,13 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
     except Exception as exc:
         raise ProducerReplayError("PRODUCER_SOURCE_PARSE_FAILED") from exc
 
-    imports: List[str] = []
     produce_defs = 0
+    helper_functions: List[str] = []
     for top in tree.body:
-        if isinstance(top, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            pass
+        if isinstance(top, ast.FunctionDef):
+            helper_functions.append(top.name)
+            if top.name == PRODUCER_ENTRYPOINT:
+                produce_defs += 1
         elif isinstance(top, ast.Assign):
             if not _literal_only(top.value):
                 raise ProducerReplayError("PRODUCER_TOP_LEVEL_NONLITERAL_ASSIGNMENT")
@@ -171,38 +97,30 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
             pass
         else:
             raise ProducerReplayError("PRODUCER_TOP_LEVEL_EXECUTION_FORBIDDEN:" + top.__class__.__name__)
-        if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)) and top.name == PRODUCER_ENTRYPOINT:
-            produce_defs += 1
 
     if produce_defs != 1:
         raise ProducerReplayError(f"PRODUCER_ENTRYPOINT_COUNT_INVALID:{produce_defs}")
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                name = alias.name
-                root = name.split(".", 1)[0]
-                imports.append(name)
-                if root in _FORBIDDEN_IMPORT_ROOTS or root not in _ALLOWED_IMPORT_ROOTS:
-                    raise ProducerReplayError("PRODUCER_IMPORT_FORBIDDEN:" + name)
-        elif isinstance(node, ast.ImportFrom):
-            if node.level:
-                raise ProducerReplayError("PRODUCER_RELATIVE_IMPORT_FORBIDDEN")
-            name = str(node.module or "")
-            root = name.split(".", 1)[0] if name else ""
-            imports.append(name)
-            if root in _FORBIDDEN_IMPORT_ROOTS or root not in _ALLOWED_IMPORT_ROOTS:
-                raise ProducerReplayError("PRODUCER_IMPORT_FORBIDDEN:" + name)
-            if any(alias.name == "*" for alias in node.names):
-                raise ProducerReplayError("PRODUCER_STAR_IMPORT_FORBIDDEN")
-        elif isinstance(node, ast.Call):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            raise ProducerReplayError("PRODUCER_IMPORT_FORBIDDEN")
+        if isinstance(node, (ast.AsyncFunctionDef, ast.Await, ast.Yield, ast.YieldFrom)):
+            raise ProducerReplayError("PRODUCER_ASYNC_OR_GENERATOR_FORBIDDEN")
+        if isinstance(node, (ast.ClassDef, ast.Global, ast.Nonlocal)):
+            raise ProducerReplayError("PRODUCER_STATEFUL_CONSTRUCT_FORBIDDEN:" + node.__class__.__name__)
+        if isinstance(node, ast.Attribute):
+            # Dunder access is the primary object-graph escape route from
+            # restricted Python execution. It has no legitimate role in the
+            # frozen decision transform.
+            if node.attr.startswith("_"):
+                raise ProducerReplayError("PRODUCER_DUNDER_ATTRIBUTE_FORBIDDEN:" + node.attr)
+        if isinstance(node, ast.Name):
+            if node.id.startswith("__"):
+                raise ProducerReplayError("PRODUCER_DUNDER_NAME_FORBIDDEN:" + node.id)
+        if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in _FORBIDDEN_CALL_NAMES:
                 raise ProducerReplayError("PRODUCER_CALL_FORBIDDEN:" + node.func.id)
-            dotted = _dotted_name(node.func)
-            lowered = dotted.lower()
-            if any(lowered.endswith(suffix) for suffix in _FORBIDDEN_ATTRIBUTE_CALL_SUFFIXES):
-                raise ProducerReplayError("PRODUCER_IO_CALL_FORBIDDEN:" + dotted)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
             lowered = node.value.lower()
             if any(token in lowered for token in _FORBIDDEN_STRING_TOKENS):
                 raise ProducerReplayError("PRODUCER_PROHIBITED_DATA_REFERENCE")
@@ -211,7 +129,10 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
         "source_policy_version": SOURCE_POLICY_VERSION,
         "producer_module_sha256": sha256_file(path),
         "entrypoint": PRODUCER_ENTRYPOINT,
-        "imports": sorted(set(imports)),
+        "helper_functions": sorted(set(helper_functions) - {PRODUCER_ENTRYPOINT}),
+        "imports_allowed": False,
+        "classes_allowed": False,
+        "dunder_access_allowed": False,
         "filesystem_api_allowed": False,
         "network_api_allowed": False,
         "dynamic_import_allowed": False,
@@ -282,26 +203,14 @@ def load_fixtures(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def _safe_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
-    if level:
-        raise ProducerReplayError("PRODUCER_RUNTIME_RELATIVE_IMPORT_FORBIDDEN")
-    root = str(name).split(".", 1)[0]
-    if root not in _ALLOWED_IMPORT_ROOTS:
-        raise ProducerReplayError("PRODUCER_RUNTIME_IMPORT_FORBIDDEN:" + str(name))
-    return builtins.__import__(name, globals, locals, fromlist, level)
-
-
 def _load_producer(path: Path):
     source_policy = verify_producer_source_policy(path)
     source = Path(path).read_text(encoding="utf-8")
-    safe_builtins = dict(vars(builtins))
-    for name in _FORBIDDEN_CALL_NAMES:
-        safe_builtins.pop(name, None)
-    safe_builtins["__import__"] = _safe_import
+    safe_builtins = {name: getattr(builtins, name) for name in _SAFE_BUILTIN_NAMES}
     namespace: Dict[str, Any] = {
-        "__name__": "r7_runtime.r6_causal_producer_candidate",
-        "__package__": "r7_runtime",
+        "__name__": "r7_causal_producer_candidate",
         "__builtins__": safe_builtins,
+        "math": math,
     }
     try:
         code = compile(source, str(path), "exec")
@@ -361,7 +270,6 @@ def replay_producer(fixture_path: Path, producer_module_path: Path) -> Tuple[byt
         })
 
     stream_bytes = _canonical_stream_bytes(output_rows)
-    import hashlib
     stream_hash = hashlib.sha256(stream_bytes).hexdigest()
     report = {
         "replay_version": REPLAY_VERSION,
@@ -375,6 +283,9 @@ def replay_producer(fixture_path: Path, producer_module_path: Path) -> Tuple[byt
         "deterministic_double_run": True,
         "producer_input_mutation_count": 0,
         "source_policy_pass": source_policy["source_policy_pass"],
+        "imports_allowed": False,
+        "classes_allowed": False,
+        "dunder_access_allowed": False,
         "filesystem_api_allowed": False,
         "network_api_allowed": False,
         "dynamic_import_allowed": False,
@@ -409,7 +320,7 @@ def verify_replay_evidence(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replay an R6 causal producer against causal fixture inputs")
+    parser = argparse.ArgumentParser(description="Replay an import-free pure R6 causal producer against causal fixture inputs")
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--producer-module", type=Path, required=True)
     parser.add_argument("--producer-stream", type=Path, required=True)
