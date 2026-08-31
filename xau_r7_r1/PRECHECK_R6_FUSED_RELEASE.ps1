@@ -39,6 +39,19 @@ function Resolve-RuntimeToolSource {
     Fail 'R7 runtime tool source not found. Expected runtime\ or r7_runtime\ beside this script.'
 }
 
+function Assert-PackagedSelfIntegrity($Python) {
+    $Manifest = Join-Path $Here 'R7_R1_PARENT_INTEGRITY.json'
+    if (!(Test-Path -LiteralPath $Manifest -PathType Leaf)) { return }
+    Push-Location $Here
+    try {
+        Invoke-Python $Python @(
+            '-c',
+            'from pathlib import Path; from r7_runtime.r6_integrity import verify_runtime_package_integrity; verify_runtime_package_integrity(Path.cwd())'
+        )
+    }
+    finally { Pop-Location }
+}
+
 $RuntimeRoot = (Resolve-Path -LiteralPath $RuntimeRoot).Path
 $CandidateRoot = (Resolve-Path -LiteralPath $CandidateRoot).Path
 if (!(Test-Path -LiteralPath $RuntimeRoot -PathType Container)) { Fail 'RuntimeRoot must be an extracted R7-R1 runtime directory' }
@@ -64,6 +77,7 @@ elseif (-not [System.IO.Path]::IsPathRooted($Output)) {
 
 $Python = Find-Python
 $RuntimeSource = Resolve-RuntimeToolSource
+Assert-PackagedSelfIntegrity $Python
 New-Item -ItemType Directory -Path $RuntimeStage -Force | Out-Null
 
 try {
