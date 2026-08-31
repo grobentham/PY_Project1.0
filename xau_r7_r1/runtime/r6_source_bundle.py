@@ -18,7 +18,7 @@ class R6SourceBundleError(RuntimeError):
     pass
 
 
-BUNDLE_VERSION = "R7_R1_R6_SOURCE_BUNDLE_V2"
+BUNDLE_VERSION = "R7_R1_R6_SOURCE_BUNDLE_V3"
 REQUIRED_SOURCE_FILES: Tuple[str, ...] = (
     "v16r6/engine.py",
     "v16r5/engine.py",
@@ -70,14 +70,17 @@ def _decode_parse(raw: bytes, relative: str) -> ast.Module:
         raise R6SourceBundleError("R6_ZIP_SOURCE_AST_INVALID:" + relative) from exc
 
 
-def _module_candidates(parts: Iterable[str]) -> Set[str]:
+def _module_target_candidates(parts: Iterable[str]) -> Set[str]:
     p = [x for x in parts if x]
     if not p:
         return set()
-    out = {"/".join(p) + ".py", "/".join(p) + "/__init__.py"}
-    for i in range(1, len(p)):
-        out.add("/".join(p[:i]) + "/__init__.py")
-    return out
+    joined = "/".join(p)
+    return {joined + ".py", joined + "/__init__.py"}
+
+
+def _package_init_candidates(parts: Iterable[str]) -> Set[str]:
+    p = [x for x in parts if x]
+    return {"/".join(p[:i]) + "/__init__.py" for i in range(1, len(p))}
 
 
 def _relative_base_module(current_relative: str, node: ast.ImportFrom) -> List[str]:
@@ -107,8 +110,50 @@ def _call_name(call: ast.Call) -> str:
     return ""
 
 
-def _local_import_dependencies(relative: str, tree: ast.Module, available: Set[str]) -> Set[str]:
+def _local_roots(available_python: Set[str]) -> Set[str]:
+    roots = set()
+    for relative in available_python:
+        parts = PurePosixPath(relative).parts
+        if len(parts) > 1:
+            roots.add(parts[0])
+    return roots
+
+
+def _resolve_module(parts: List[str], available: Set[str]) -> Tuple[Set[str], bool]:
+    if not parts:
+        return set(), False
+    target_candidates = _module_target_candidates(parts)
+    targets = target_candidates & available
+    deps = set(targets)
+    deps |= _package_init_candidates(parts) & available
+    return deps, bool(targets)
+
+
+def _import_descriptor(node: ast.AST) -> str:
+    if isinstance(node, ast.Import):
+        return "import " + ",".join(alias.name for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        prefix = "." * int(node.level or 0)
+        module = prefix + str(node.module or "")
+        return "from " + module + " import " + ",".join(alias.name for alias in node.names)
+    return ast.dump(node, include_attributes=False)
+
+
+def _local_import_dependencies(
+    relative: str,
+    tree: ast.Module,
+    available: Set[str],
+    local_roots: Set[str],
+) -> Tuple[Set[str], Set[str]]:
+    """Return archive-local Python deps and unresolved non-archive imports.
+
+    Relative imports and absolute imports rooted in an archive-local package are
+    mandatory. If those targets are absent, extraction fails closed. Imports
+    with no archive-local package root are recorded as unresolved/non-archive
+    (normally stdlib or third-party dependencies) rather than silently erased.
+    """
     deps: Set[str] = set()
+    unresolved_nonarchive: Set[str] = set()
     dynamic_calls = sorted({_call_name(n) for n in ast.walk(tree) if isinstance(n, ast.Call)} & _DYNAMIC_IMPORT_CALLS)
     if dynamic_calls:
         raise R6SourceBundleError(
@@ -116,18 +161,48 @@ def _local_import_dependencies(relative: str, tree: ast.Module, available: Set[s
         )
 
     for node in ast.walk(tree):
-        candidates: Set[str] = set()
         if isinstance(node, ast.Import):
             for alias in node.names:
-                candidates |= _module_candidates(alias.name.split("."))
+                parts = alias.name.split(".")
+                resolved, target_found = _resolve_module(parts, available)
+                if target_found:
+                    deps |= resolved
+                elif parts[0] in local_roots:
+                    raise R6SourceBundleError(
+                        "R6_SOURCE_REQUIRED_LOCAL_IMPORT_MISSING:" + relative + ":" + alias.name
+                    )
+                else:
+                    unresolved_nonarchive.add("import " + alias.name)
+
         elif isinstance(node, ast.ImportFrom):
             base = _relative_base_module(relative, node)
-            candidates |= _module_candidates(base)
-            for alias in node.names:
-                if alias.name != "*":
-                    candidates |= _module_candidates(base + alias.name.split("."))
-        deps |= {candidate for candidate in candidates if candidate in available}
-    return deps
+            resolved_base, base_found = _resolve_module(base, available)
+            relative_import = int(node.level or 0) > 0
+            root_local = bool(base and base[0] in local_roots)
+
+            if base_found:
+                deps |= resolved_base
+                # Python permits `from package import submodule`; include any
+                # archive-local alias module without assuming every imported
+                # name is itself a module.
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    alias_resolved, alias_found = _resolve_module(base + alias.name.split("."), available)
+                    if alias_found:
+                        deps |= alias_resolved
+                continue
+
+            if relative_import or root_local:
+                raise R6SourceBundleError(
+                    "R6_SOURCE_REQUIRED_LOCAL_IMPORT_MISSING:"
+                    + relative
+                    + ":"
+                    + _import_descriptor(node)
+                )
+            unresolved_nonarchive.add(_import_descriptor(node))
+
+    return deps, unresolved_nonarchive
 
 
 def _safe_prepare_output(output_root: Path, replace_existing: bool) -> None:
@@ -162,6 +237,7 @@ def extract_canonical_source_bundle(
 
     files: Dict[str, Dict[str, object]] = {}
     dependency_order: List[str] = []
+    unresolved_by_file: Dict[str, List[str]] = {}
     try:
         with zipfile.ZipFile(parent_zip, "r") as archive:
             members: Dict[str, zipfile.ZipInfo] = {}
@@ -178,10 +254,10 @@ def extract_canonical_source_bundle(
                 raise R6SourceBundleError("R6_ZIP_REQUIRED_SOURCE_MISSING:" + ",".join(missing))
 
             available_python = {name for name in members if name.lower().endswith(".py")}
+            local_roots = _local_roots(available_python)
             queue: List[str] = list(REQUIRED_SOURCE_FILES)
             queued: Set[str] = set(queue)
             raw_cache: Dict[str, bytes] = {}
-            tree_cache: Dict[str, ast.Module] = {}
             total_bytes = 0
 
             index = 0
@@ -205,9 +281,14 @@ def extract_canonical_source_bundle(
                     raise R6SourceBundleError("R6_SOURCE_TOTAL_SIZE_LIMIT_EXCEEDED")
                 tree = _decode_parse(raw, relative)
                 raw_cache[relative] = raw
-                tree_cache[relative] = tree
                 dependency_order.append(relative)
-                for dep in sorted(_local_import_dependencies(relative, tree, available_python)):
+
+                local_deps, unresolved = _local_import_dependencies(
+                    relative, tree, available_python, local_roots
+                )
+                if unresolved:
+                    unresolved_by_file[relative] = sorted(unresolved)
+                for dep in sorted(local_deps):
                     if dep not in queued:
                         queued.add(dep)
                         queue.append(dep)
@@ -243,11 +324,13 @@ def extract_canonical_source_bundle(
         "bundle_version": BUNDLE_VERSION,
         "canonical_parent_zip_sha256": actual_parent_sha,
         "source_only_bundle": True,
-        "static_local_python_dependency_closure": True,
+        "static_local_python_dependency_closure_extracted": True,
+        "required_local_imports_resolved": True,
         "dynamic_imports_allowed": False,
         "dependency_count": len(dependency_order),
         "required_source_files": list(REQUIRED_SOURCE_FILES),
         "dependency_closure_files": dependency_order,
+        "unresolved_nonarchive_imports": unresolved_by_file,
         "strategy_executed": False,
         "strategy_retuned": False,
         "final_holdout_accessed": False,
@@ -263,7 +346,7 @@ def extract_canonical_source_bundle(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract exact frozen R5/R6 Python source and its local import closure from the canonical R6 ZIP"
+        description="Extract exact frozen R5/R6 Python source and its archive-local import closure from the canonical R6 ZIP"
     )
     parser.add_argument("--zip", dest="parent_zip", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
