@@ -2,18 +2,18 @@
 
 ## Status
 
-R7-R1 is an operational runtime repair around the frozen V16 R6 strategy package.
+R7-R1 is a hardened operational runtime around the frozen V16 R6 strategy package.
 
-It does **not** retune R6 and it does **not** access Final Holdout outcomes.
+It does **not** retune R6 and does **not** access Final Holdout outcomes. Real/live account execution is prohibited.
 
-Real/live account execution is prohibited. Demo order sending is disabled by default.
+Most importantly, packaged R7-R1 order sending is currently **hard-locked even on demo** because the exact causal frozen-R6 decision producer has not yet been implemented and audited. This prevents hand-crafted JSON from masquerading as genuine R6 strategy output.
 
 ## Requirements
 
 - Windows 10/11
 - Python 3.9 or newer
-- MetaTrader 5 desktop terminal
-- Blueberry Markets demo account logged in
+- MetaTrader 5 desktop terminal for connected status/recovery
+- Blueberry Markets demo account
 - account currency SGD
 - broker symbol `XAUUSD.i`
 - Python package `MetaTrader5` for connected MT5 operations
@@ -28,91 +28,100 @@ Run only:
 
 The launcher provides:
 
-1. Offline software + package-integrity status
+1. Offline package + persistent-state integrity status
 2. MT5 account/quote/exposure status
-3. Crash-recovery reconciliation
-4. R6-derived intent preflight with **no send**
-5. Explicitly unlocked demo submission
-6. Preserved original R6 launcher
-7. Exit
+3. Crash-recovery reconciliation — never auto-resends
+4. Raw-intent diagnostic preflight — no send authority
+5. Open the R6 decision inbox for staging only
+6. Producer/execution readiness status
+7. Explicit manual-review pause clearing after broker review
+8. Exit
+
+There is no raw-order send option and no executable legacy R6 launcher option.
 
 ## Frozen risk enforcement
 
-R7-R1 enforces:
+The execution engine enforces:
 
 - 0.55% operating projected-stop risk cap
 - 0.60% constitutional projected-stop risk ceiling
 - S$850 projected-equity floor
 - maximum 0.02 canonical lot
-- one XAUUSD.i exposure domain at a time, including pending orders
-- `AUX_RF_LTM` rejected
+- one `XAUUSD.i` exposure domain at a time, including pending orders
+- permanent `AUX_RF_LTM` rejection
 - martingale OFF
 - recovery OFF
 - averaging down OFF
 - pyramiding OFF
 - loss-contingent sizing OFF
 
-Projected stop risk is calculated from the current executable MT5 quote to the broker stop using MT5 `order_calc_profit()`, plus the frozen protected-validation round-turn commission burden of S$0.0945 per 0.01 lot. The caller cannot supply its own projected-loss number.
+Pre-send projected stop risk comes from MT5 `order_calc_profit()` plus the frozen commission assumption and an adverse execution-deviation budget. The caller cannot supply its own projected-loss number.
 
-## Demo execution lock
+After a broker fill, ACK requires actual side, actual full lot, SL, TP, submitted protective-price preservation and actual stop-risk verification. `PLACED` and `DONE_PARTIAL` are never ACKed. Unsafe or ambiguous owned exposure enters scoped emergency containment and `MANUAL_REVIEW_NO_RESUBMIT`.
 
-`order_send()` cannot be reached unless all of the following are true:
+## Persistent-state safety
 
-- package integrity passes
-- Blueberry server identity passes
-- server is a demo server
-- account currency is SGD
-- `XAUUSD.i` is available
-- MT5 trading permissions are enabled
-- quote/spread guards pass
-- no existing XAUUSD.i position or pending order exists
-- broker volume/stops geometry passes
-- broker-derived frozen risk gates pass
-- `order_check()` passes
-- a second immediately-before-send preflight also passes
-- `R7_R1_RUNTIME_CONFIG.json` contains `"request_demo_execution": true`
-- environment variable `XAU_R7_R1_ENABLE_DEMO_EXECUTION` exactly equals `YES_I_ACCEPT_DEMO_ONLY`
+SQLite is configured with WAL and `synchronous=FULL`. Runtime state and intent state are checked against the append-only hash-chained audit ledger before MT5 is touched.
 
-The default configuration keeps demo submission locked.
+The integrity gate detects, among other things:
 
-## Intent JSON boundary
+- deleted or injected intents
+- payload or state mutation
+- injected/changed broker tickets
+- deleted audited runtime-state rows
+- injected unaudited runtime-state rows
+- runtime-state value mutation
+- audit-chain mutation
 
-R7-R1 deliberately does not fabricate a live strategy feed from the research/backtest engine. Until a separately audited causal R6 live-signal adapter exists, the execution boundary accepts an explicit intent JSON containing only:
+Manual-review pause is persisted to SQLite before evidence archival and mirrored to the filesystem. Deleting only the marker does not resume operation. Resume requires the exact acknowledgement phrase, zero XAU exposure and zero unresolved in-flight intents.
 
-```json
-{
-  "client_intent_id": "unique_id",
-  "side": "BUY",
-  "lot": 0.01,
-  "stop_price": 2999.0,
-  "take_profit_price": 3002.0,
-  "source": "BASE"
-}
-```
+## Broker safety
 
-Prices above are examples only, not trading instructions.
+Connected account/server identity is pinned and rechecked on sensitive operations. The gateway rejects non-SGD accounts, non-Blueberry servers, non-demo trade mode, account/server switching, invalid/stale quotes, excessive entry spread, invalid volume/stops geometry and disabled terminal/account/symbol trading permissions.
 
-The runtime derives the executable entry price, projected stop loss, risk percentage and broker request itself.
+Emergency containment is scoped to R7-R1-owned magic/comment exposure only. It does not touch unrelated XAU positions. Normal entry spread restrictions do not prevent an emergency close attempt.
+
+## Frozen-R6 decision boundary
+
+The runtime contains a strict admitted-decision parser for the eventual causal R6 producer. It checks:
+
+- frozen schema and policy ID
+- exact canonical R6 parent SHA-256
+- admitted flag
+- source / priority / family mapping
+- frozen source-specific geometry
+- canonical lot ceiling
+- emission freshness
+- independent underlying signal freshness
+- retired `AUX_RF_LTM`
+- idempotent decision fingerprint
+
+That parser proves the decision **shape and frozen constraints**, not how the upstream signal was calculated. Therefore a manually created JSON is not sufficient provenance for autonomous execution.
+
+## Causal-producer readiness lock
+
+`CAUSAL_R6_PRODUCER_READY` is hard-coded `False` in R7-R1. Consequently, the packaged runtime cannot reach automatic decision sending even if both demo unlock inputs are set.
+
+A future audited successor may enable the runtime only after it contains an exact causal producer derived from the frozen R6 feature/selector source.
+
+The existing two demo unlock inputs are retained as additional gates for that successor:
+
+1. `R7_R1_RUNTIME_CONFIG.json` -> `"request_demo_execution": true`
+2. `XAU_R7_R1_ENABLE_DEMO_EXECUTION=YES_I_ACCEPT_DEMO_ONLY`
+
+They are necessary but **not sufficient** in R7-R1.
 
 ## Crash and duplicate behavior
 
-- Intent payloads are stored transactionally in SQLite WAL mode with `synchronous=FULL`.
-- Reusing an intent ID with a changed payload is an idempotency collision and fails closed.
-- The broker is checked for the same R7-R1 magic/comment before a new intent proceeds.
-- Runtime persists `SUBMITTING` before `order_send()`.
-- After a crash, `SUBMITTING`/`SUBMITTED` intents are reconciled against MT5.
-- Ambiguous states become `MANUAL_REVIEW_NO_RESUBMIT`.
-- R7-R1 never automatically resubmits an ambiguous order.
+- Intent payloads are transactional and idempotent.
+- Changed payload under the same intent ID fails closed.
+- Broker magic/comment is checked for duplicates.
+- `SUBMITTING` is persisted before `order_send()`.
+- Restart recovery reconciles in-flight state and never auto-resubmits.
+- Reconciliation failures after a possible send attempt scoped containment before terminal manual review.
 
-## Integrity behavior
+## Integrity and build behavior
 
-Every R7-R1 invocation verifies before creating mutable state:
+Every packaged invocation verifies the recorded inherited R6 and R7 runtime hashes before mutable state is used. `BUILD_R7_R1.ps1` also compiles, unit-tests and integrity-checks the assembled package before ZIP creation and repeats those checks after clean extraction before reporting PASS.
 
-- canonical R6 parent authority recorded by the builder
-- every inherited R6 file except the deliberate top-level launcher replacement
-- protected R6 strategy/policy files
-- preserved original R6 launcher bytes
-- R7-R1 runtime Python files
-- replacement `START_XAU.bat`
-
-The final ZIP is also compiled, unit-tested and integrity-checked again after clean extraction by `BUILD_R7_R1.ps1` before the builder reports PASS.
+R7-R1 should be described as a **hardened fail-closed runtime**. It is not yet a complete autonomous R6 trading system because the exact causal decision producer remains the next software phase.
