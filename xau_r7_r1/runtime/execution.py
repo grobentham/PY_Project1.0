@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import asdict
 from typing import Any, Dict, List
@@ -11,6 +12,7 @@ from .risk import RiskGovernor
 
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,20}$")
+_SOURCE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
 class ExecutionError(RuntimeError):
@@ -30,8 +32,19 @@ class ExecutionEngine:
             raise ExecutionError("INVALID_CLIENT_INTENT_ID")
         if intent.side.upper() not in {"BUY", "SELL"}:
             raise ExecutionError("UNSUPPORTED_SIDE")
-        if not intent.source or not isinstance(intent.source, str):
+        if not isinstance(intent.source, str) or not _SOURCE_RE.fullmatch(intent.source):
             raise ExecutionError("INVALID_SOURCE")
+        numeric = [float(intent.lot), float(intent.stop_price)]
+        if intent.take_profit_price is not None:
+            numeric.append(float(intent.take_profit_price))
+        if not all(math.isfinite(v) for v in numeric):
+            raise ExecutionError("NONFINITE_INTENT_GEOMETRY")
+        if float(intent.lot) <= 0:
+            raise ExecutionError("NON_POSITIVE_LOT")
+        if float(intent.stop_price) <= 0:
+            raise ExecutionError("NON_POSITIVE_STOP_PRICE")
+        if intent.take_profit_price is not None and float(intent.take_profit_price) <= 0:
+            raise ExecutionError("NON_POSITIVE_TARGET_PRICE")
 
     def _broker_preflight(self, intent: OrderIntent) -> Dict[str, Any]:
         account = self.gateway.account_snapshot()
@@ -65,9 +78,6 @@ class ExecutionEngine:
             if exposure.total_count != 1:
                 return {"ok": False, "reason": "POST_SEND_EXPOSURE_COUNT_MISMATCH", "exposure": detail}
         elif match.kind == "DEAL":
-            # find_intent_at_broker checks current position/order first. A historical
-            # deal match therefore means this intent has no current exposure. Any
-            # remaining XAU exposure is unexpected and must be reviewed manually.
             if exposure.total_count != 0:
                 return {"ok": False, "reason": "POST_SEND_UNEXPECTED_XAU_EXPOSURE", "exposure": detail}
         else:
@@ -75,7 +85,22 @@ class ExecutionEngine:
         return {"ok": True, "exposure": detail}
 
     def _acknowledge_or_manual(self, intent_id: str, match: BrokerMatch, *, base_detail: Dict[str, Any]) -> Dict[str, Any]:
-        post = self._post_send_exposure_ok(match)
+        try:
+            post = self._post_send_exposure_ok(match)
+        except Exception as exc:
+            self.store.transition(
+                intent_id,
+                "MANUAL_REVIEW_NO_RESUBMIT",
+                broker_ticket=match.ticket,
+                error=f"POST_SEND_EXPOSURE_QUERY_FAILED:{exc}",
+                detail={**base_detail, "broker_match": asdict(match), "automatic_resubmit": False},
+            )
+            return {
+                "ok": False,
+                "state": "MANUAL_REVIEW_NO_RESUBMIT",
+                "reason": f"POST_SEND_EXPOSURE_QUERY_FAILED:{exc}",
+                "broker_match": asdict(match),
+            }
         detail = dict(base_detail)
         detail.update({"broker_kind": match.kind, "broker_state": match.state, "post_send": post})
         if not post["ok"]:
@@ -96,6 +121,21 @@ class ExecutionEngine:
         self.store.transition(intent_id, "ACKNOWLEDGED", broker_ticket=match.ticket, detail=detail)
         return {"ok": True, "state": "ACKNOWLEDGED", "broker_match": asdict(match), "post_send": post}
 
+    def _find_broker_match_fail_closed(self, intent_id: str, *, after_send: bool) -> BrokerMatch:
+        try:
+            return self.gateway.find_intent_at_broker(intent_id)
+        except Exception as exc:
+            if after_send:
+                self.store.transition(
+                    intent_id,
+                    "MANUAL_REVIEW_NO_RESUBMIT",
+                    error=f"BROKER_RECONCILIATION_FAILED:{exc}",
+                    detail={"automatic_resubmit": False},
+                )
+                raise ExecutionError(f"BROKER_RECONCILIATION_FAILED_NO_RESUBMIT:{exc}") from exc
+            self.store.transition(intent_id, "FAILED_SAFE", error=f"BROKER_DUPLICATE_CHECK_FAILED:{exc}")
+            raise ExecutionError(f"BROKER_DUPLICATE_CHECK_FAILED:{exc}") from exc
+
     def submit(self, intent: OrderIntent) -> Dict[str, Any]:
         self.validate_intent_shape(intent)
         payload = intent.canonical_payload()
@@ -107,6 +147,19 @@ class ExecutionEngine:
                 {"client_intent_id": intent.client_intent_id, "state": existing["state"]},
             )
             return {"ok": False, "duplicate_suppressed": True, "intent": existing}
+
+        # Broker-side idempotency protects against a lost/replaced local database.
+        # A matching R7-R1 magic+comment means this intent was already seen by MT5.
+        try:
+            preexisting = self._find_broker_match_fail_closed(intent.client_intent_id, after_send=False)
+        except ExecutionError as exc:
+            return {"ok": False, "state": "FAILED_SAFE", "reason": str(exc)}
+        if preexisting.found:
+            return self._acknowledge_or_manual(
+                intent.client_intent_id,
+                preexisting,
+                base_detail={"broker_duplicate_preexisting": True, "send_attempted": False},
+            )
 
         try:
             first = self._broker_preflight(intent)
@@ -145,8 +198,6 @@ class ExecutionEngine:
                 "risk": decision["risk"],
             }
 
-        # Re-snapshot immediately before the irreversible send. A previously valid
-        # preflight cannot authorize a changed quote, spread, exposure, or risk state.
         try:
             second = self._broker_preflight(intent)
             second_decision = second["decision"]
@@ -163,8 +214,6 @@ class ExecutionEngine:
             self.store.transition(intent.client_intent_id, "ABANDONED_BEFORE_SEND", error=str(exc))
             return {"ok": False, "state": "ABANDONED_BEFORE_SEND", "reason": str(exc)}
 
-        # Persist SUBMITTING before order_send. If the process dies after this point,
-        # restart recovery must reconcile with the broker and must never auto-resubmit.
         self.store.transition(
             intent.client_intent_id,
             "SUBMITTING",
@@ -174,23 +223,29 @@ class ExecutionEngine:
             result = self.gateway.order_send(second["request"])
             ticket = int(getattr(result, "order", 0) or getattr(result, "deal", 0) or 0) or None
             self.store.transition(intent.client_intent_id, "SUBMITTED", broker_ticket=ticket)
-        except Exception as exc:
-            match = self.gateway.find_intent_at_broker(intent.client_intent_id)
+        except Exception as send_exc:
+            try:
+                match = self._find_broker_match_fail_closed(intent.client_intent_id, after_send=True)
+            except ExecutionError as reconcile_exc:
+                return {"ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": str(reconcile_exc), "send_error": str(send_exc)}
             if match.found:
                 return self._acknowledge_or_manual(
                     intent.client_intent_id,
                     match,
-                    base_detail={"recovered_after_send_exception": True, "send_error": str(exc)},
+                    base_detail={"recovered_after_send_exception": True, "send_error": str(send_exc)},
                 )
             self.store.transition(
                 intent.client_intent_id,
                 "MANUAL_REVIEW_NO_RESUBMIT",
-                error=str(exc),
+                error=str(send_exc),
                 detail={"automatic_resubmit": False},
             )
-            return {"ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": str(exc)}
+            return {"ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": str(send_exc)}
 
-        match = self.gateway.find_intent_at_broker(intent.client_intent_id)
+        try:
+            match = self._find_broker_match_fail_closed(intent.client_intent_id, after_send=True)
+        except ExecutionError as exc:
+            return {"ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": str(exc)}
         if match.found:
             return self._acknowledge_or_manual(
                 intent.client_intent_id,
@@ -219,7 +274,11 @@ class ExecutionEngine:
                 results.append({"client_intent_id": intent_id, "state": "ABANDONED_BEFORE_SEND"})
                 continue
             if state in {"SUBMITTING", "SUBMITTED"}:
-                match = self.gateway.find_intent_at_broker(intent_id)
+                try:
+                    match = self._find_broker_match_fail_closed(intent_id, after_send=True)
+                except ExecutionError as exc:
+                    results.append({"client_intent_id": intent_id, "state": "MANUAL_REVIEW_NO_RESUBMIT", "reason": str(exc)})
+                    continue
                 if match.found:
                     result = self._acknowledge_or_manual(
                         intent_id,
