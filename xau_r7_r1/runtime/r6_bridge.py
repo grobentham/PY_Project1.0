@@ -93,7 +93,9 @@ class R6InboxProcessor:
             "decision_file": decision_file,
             "automatic_resume": False,
         }
-        # Persist in SQLite first. Deleting only the marker file cannot resume.
+        # SQLite is authoritative and is written first. Even if filesystem
+        # marker creation/archive subsequently fails, the next operation sees
+        # the persistent pause and refuses more decisions.
         self.store.set_runtime_state(R6_BRIDGE_PAUSE_STATE_KEY, payload)
         tmp = self.pause_marker.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -123,7 +125,7 @@ class R6InboxProcessor:
         self.store.set_runtime_state(R6_BRIDGE_PAUSE_STATE_KEY, False)
         try:
             self.pause_marker.unlink(missing_ok=True)
-        except TypeError:  # Python 3.7/3.8 fallback; harmless on supported 3.9+
+        except TypeError:
             if self.pause_marker.exists():
                 self.pause_marker.unlink()
         return {"cleared": True, "broker_exposure_zero": True, "automatic_resubmit": False}
@@ -135,7 +137,6 @@ class R6InboxProcessor:
         raw = self._stable_read(source)
         raw_hash = hashlib.sha256(raw).hexdigest()
         self.store.append_event("R6_DECISION_FILE_SEEN", {"file": self._safe_name(source), "raw_sha256": raw_hash, "bytes": len(raw)})
-
         try:
             decision, parsed_raw_hash = self.adapter.parse(raw, now_ms=now_ms)
         except Exception as exc:
@@ -146,7 +147,6 @@ class R6InboxProcessor:
             return result
         if parsed_raw_hash != raw_hash:
             raise BridgeError("DECISION_HASH_INTERNAL_MISMATCH")
-
         self.store.append_event("R6_DECISION_VALIDATED", {"decision_id": decision.decision_id, "source": decision.source, "signal_bar_ms": decision.signal_bar_ms, "raw_sha256": raw_hash})
         try:
             symbol = self.gateway.symbol_snapshot()
@@ -157,7 +157,6 @@ class R6InboxProcessor:
             archived = self._archive(source, self.rejected, raw_hash, result)
             result["archived_to"] = str(archived)
             return result
-
         self.store.append_event("R6_DECISION_ADAPTED", {
             "decision_id": adapted.decision.decision_id,
             "client_intent_id": adapted.intent.client_intent_id,
@@ -170,21 +169,26 @@ class R6InboxProcessor:
             execution_result = self.engine.submit(adapted.intent)
         except Exception as exc:
             result = {
-                "ok": False, "state": "MANUAL_REVIEW_NO_RESUBMIT",
+                "ok": False,
+                "state": "MANUAL_REVIEW_NO_RESUBMIT",
                 "reason": "BRIDGE_EXECUTION_EXCEPTION:" + str(exc),
-                "raw_sha256": raw_hash, "decision_id": adapted.decision.decision_id,
+                "raw_sha256": raw_hash,
+                "decision_id": adapted.decision.decision_id,
                 "client_intent_id": adapted.intent.client_intent_id,
             }
             self.store.append_event("R6_BRIDGE_MANUAL_REVIEW", result)
+            # Pause first; archival is secondary evidence handling.
+            self._write_pause_marker(result["reason"], self._safe_name(source))
             archived = self._archive(source, self.manual_review, raw_hash, result)
-            self._write_pause_marker(result["reason"], archived.name)
             result["archived_to"] = str(archived)
             return result
 
         state = execution_result.get("state")
         result = {
-            "ok": bool(execution_result.get("ok")), "state": state,
-            "execution": execution_result, "raw_sha256": raw_hash,
+            "ok": bool(execution_result.get("ok")),
+            "state": state,
+            "execution": execution_result,
+            "raw_sha256": raw_hash,
             "decision_id": adapted.decision.decision_id,
             "decision_fingerprint": adapted.decision_fingerprint,
             "client_intent_id": adapted.intent.client_intent_id,
@@ -198,11 +202,13 @@ class R6InboxProcessor:
             bucket = self.rejected
         else:
             bucket = self.processed
+        if state in MANUAL_REVIEW_STATES:
+            # Persist pause before moving/writing evidence. This prevents an I/O
+            # failure from leaving the next inbox item executable.
+            self._write_pause_marker(str(execution_result.get("reason", state)), self._safe_name(source))
         archived = self._archive(source, bucket, raw_hash, result)
         result["archived_to"] = str(archived)
         self.store.append_event("R6_DECISION_ARCHIVED", {"decision_id": adapted.decision.decision_id, "state": result["state"], "raw_sha256": raw_hash, "bucket": bucket.name})
-        if state in MANUAL_REVIEW_STATES:
-            self._write_pause_marker(str(execution_result.get("reason", state)), archived.name)
         return result
 
     def drain_once(self, *, now_ms: Optional[int] = None) -> List[Dict[str, Any]]:
