@@ -8,17 +8,12 @@ from pathlib import Path
 from typing import Any, Dict
 
 from .audit_store import AuditStore
-from .constants import (
-    EXECUTION_UNLOCK_ENV,
-    EXECUTION_UNLOCK_VALUE,
-    HARD_MAX_SPREAD_USD,
-    HARD_MAX_TICK_AGE_SECONDS,
-    VERSION,
-)
+from .constants import EXECUTION_UNLOCK_ENV, EXECUTION_UNLOCK_VALUE, HARD_MAX_SPREAD_USD, HARD_MAX_TICK_AGE_SECONDS, VERSION
 from .execution import ExecutionEngine
 from .instance_lock import SingleInstanceLock
 from .models import OrderIntent
 from .mt5_gateway import MT5Gateway
+from .r6_bridge import R6InboxProcessor
 from .r6_integrity import verify_runtime_package_integrity
 
 
@@ -26,13 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = ROOT / "r7_runtime_state"
 DB_PATH = RUNTIME_DIR / "r7_r1_state.sqlite3"
 LOCK_PATH = RUNTIME_DIR / "r7_r1_runtime.lock"
+BRIDGE_ROOT = ROOT / "r7_r6_bridge"
 CONFIG_PATH = ROOT / "R7_R1_RUNTIME_CONFIG.json"
-_ALLOWED_CONFIG_KEYS = {
-    "max_tick_age_seconds",
-    "max_spread_usd",
-    "request_demo_execution",
-    "_note",
-}
+_ALLOWED_CONFIG_KEYS = {"max_tick_age_seconds", "max_spread_usd", "request_demo_execution", "_note"}
 
 
 def _finite_number(value: Any, name: str) -> float:
@@ -96,17 +87,8 @@ def load_intent(path: Path) -> OrderIntent:
             raise RuntimeError(f"INTENT_{key.upper()}_MUST_BE_STRING")
     lot = _finite_number(raw["lot"], "INTENT_LOT")
     stop = _finite_number(raw["stop_price"], "INTENT_STOP_PRICE")
-    target = None
-    if raw.get("take_profit_price") is not None:
-        target = _finite_number(raw["take_profit_price"], "INTENT_TAKE_PROFIT_PRICE")
-    return OrderIntent(
-        client_intent_id=raw["client_intent_id"],
-        side=raw["side"],
-        lot=lot,
-        stop_price=stop,
-        take_profit_price=target,
-        source=raw["source"],
-    )
+    target = None if raw.get("take_profit_price") is None else _finite_number(raw["take_profit_price"], "INTENT_TAKE_PROFIT_PRICE")
+    return OrderIntent(raw["client_intent_id"], raw["side"], lot, stop, target, raw["source"])
 
 
 def offline_status(store: AuditStore, integrity: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -117,23 +99,24 @@ def offline_status(store: AuditStore, integrity: Dict[str, Any], cfg: Dict[str, 
         "audit_chain_ok": store.verify_chain(),
         "demo_execution_requested": cfg["request_demo_execution"],
         "execution_unlocked": demo_execution_enabled(cfg),
+        "r6_bridge_root": str(BRIDGE_ROOT),
+        "r6_bridge_paused": (BRIDGE_ROOT / "PAUSED_MANUAL_REVIEW").exists(),
         "final_holdout_accessed": False,
     }
 
 
 def connected_status(store: AuditStore, gateway: MT5Gateway, cfg: Dict[str, Any], integrity: Dict[str, Any]) -> Dict[str, Any]:
-    account = gateway.account_snapshot()
-    symbol = gateway.symbol_snapshot()
-    exposure = gateway.exposure_snapshot()
     return {
         "version": VERSION,
         "package_integrity": "PASS",
         "integrity": integrity,
         "audit_chain_ok": store.verify_chain(),
         "execution_unlocked": demo_execution_enabled(cfg),
-        "account": account.__dict__,
-        "symbol": symbol.__dict__,
-        "exposure": exposure.__dict__,
+        "account": gateway.account_snapshot().__dict__,
+        "symbol": gateway.symbol_snapshot().__dict__,
+        "exposure": gateway.exposure_snapshot().__dict__,
+        "r6_bridge_root": str(BRIDGE_ROOT),
+        "r6_bridge_paused": (BRIDGE_ROOT / "PAUSED_MANUAL_REVIEW").exists(),
     }
 
 
@@ -145,10 +128,12 @@ def main() -> None:
     group.add_argument("--recover", action="store_true")
     group.add_argument("--preflight-intent", type=Path)
     group.add_argument("--submit-intent", type=Path)
+    group.add_argument("--process-r6-decision", type=Path)
+    group.add_argument("--drain-r6-inbox", action="store_true")
+    group.add_argument("--run-r6-inbox", action="store_true")
     args = parser.parse_args()
 
     cfg = load_config()
-    # Verify immutable parent + R7 runtime code before creating lock/database state.
     integrity = verify_runtime_package_integrity(ROOT)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -160,35 +145,35 @@ def main() -> None:
                 print(json.dumps(offline_status(store, integrity, cfg), indent=2, sort_keys=True))
                 return
 
-            gateway = MT5Gateway(
-                max_tick_age_seconds=cfg["max_tick_age_seconds"],
-                max_spread_usd=cfg["max_spread_usd"],
-            )
+            gateway = MT5Gateway(max_tick_age_seconds=cfg["max_tick_age_seconds"], max_spread_usd=cfg["max_spread_usd"])
             gateway.connect()
-
             if args.status:
                 print(json.dumps(connected_status(store, gateway, cfg, integrity), indent=2, sort_keys=True))
                 return
 
-            engine = ExecutionEngine(store, gateway, execution_enabled=demo_execution_enabled(cfg))
+            execution_enabled = demo_execution_enabled(cfg)
+            engine = ExecutionEngine(store, gateway, execution_enabled=execution_enabled)
             if args.recover:
-                result = engine.recover_inflight()
-                print(json.dumps({"recovered": result}, indent=2, sort_keys=True))
+                print(json.dumps({"recovered": engine.recover_inflight()}, indent=2, sort_keys=True))
                 return
-
             if args.preflight_intent:
-                intent = load_intent(args.preflight_intent)
-                dry_engine = ExecutionEngine(store, gateway, execution_enabled=False)
-                print(json.dumps(dry_engine.submit(intent), indent=2, sort_keys=True))
+                print(json.dumps(ExecutionEngine(store, gateway, execution_enabled=False).submit(load_intent(args.preflight_intent)), indent=2, sort_keys=True))
+                return
+            if args.submit_intent:
+                if not execution_enabled:
+                    raise RuntimeError("DEMO_EXECUTION_LOCKED: set request_demo_execution=true and exact environment unlock; live accounts remain prohibited")
+                print(json.dumps(engine.submit(load_intent(args.submit_intent)), indent=2, sort_keys=True))
                 return
 
-            if args.submit_intent:
-                if not demo_execution_enabled(cfg):
-                    raise RuntimeError(
-                        "DEMO_EXECUTION_LOCKED: set request_demo_execution=true and exact environment unlock; live accounts remain prohibited"
-                    )
-                intent = load_intent(args.submit_intent)
-                print(json.dumps(engine.submit(intent), indent=2, sort_keys=True))
+            bridge = R6InboxProcessor(BRIDGE_ROOT, store, gateway, execution_enabled=execution_enabled)
+            if args.process_r6_decision:
+                print(json.dumps(bridge.process_path(args.process_r6_decision), indent=2, sort_keys=True))
+                return
+            if args.drain_r6_inbox:
+                print(json.dumps({"results": bridge.drain_once()}, indent=2, sort_keys=True))
+                return
+            if args.run_r6_inbox:
+                bridge.run_forever()
                 return
         finally:
             if gateway is not None:
