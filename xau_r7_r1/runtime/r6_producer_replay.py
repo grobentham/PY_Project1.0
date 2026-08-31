@@ -83,6 +83,8 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
     produce_defs = 0
     helper_functions: List[str] = []
     for top in tree.body:
+        if isinstance(top, (ast.Import, ast.ImportFrom)):
+            raise ProducerReplayError("PRODUCER_IMPORT_FORBIDDEN")
         if isinstance(top, ast.FunctionDef):
             helper_functions.append(top.name)
             if top.name == PRODUCER_ENTRYPOINT:
@@ -109,14 +111,10 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
         if isinstance(node, (ast.ClassDef, ast.Global, ast.Nonlocal)):
             raise ProducerReplayError("PRODUCER_STATEFUL_CONSTRUCT_FORBIDDEN:" + node.__class__.__name__)
         if isinstance(node, ast.Attribute):
-            # Dunder access is the primary object-graph escape route from
-            # restricted Python execution. It has no legitimate role in the
-            # frozen decision transform.
             if node.attr.startswith("_"):
                 raise ProducerReplayError("PRODUCER_DUNDER_ATTRIBUTE_FORBIDDEN:" + node.attr)
-        if isinstance(node, ast.Name):
-            if node.id.startswith("__"):
-                raise ProducerReplayError("PRODUCER_DUNDER_NAME_FORBIDDEN:" + node.id)
+        if isinstance(node, ast.Name) and node.id.startswith("__"):
+            raise ProducerReplayError("PRODUCER_DUNDER_NAME_FORBIDDEN:" + node.id)
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in _FORBIDDEN_CALL_NAMES:
                 raise ProducerReplayError("PRODUCER_CALL_FORBIDDEN:" + node.func.id)
