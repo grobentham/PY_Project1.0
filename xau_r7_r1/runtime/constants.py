@@ -31,6 +31,7 @@ COMMENT_PREFIX = "R7R1:"
 
 EXECUTION_UNLOCK_ENV = "XAU_R7_R1_ENABLE_DEMO_EXECUTION"
 EXECUTION_UNLOCK_VALUE = "YES_I_ACCEPT_DEMO_ONLY"
+R6_EXECUTION_AUTHORITY = "FROZEN_R6_ADMITTED_DECISION_V1"
 
 # Frozen bridge contract. R7-R1 consumes an already-admitted R6 decision and
 # never re-selects or retunes the strategy.
