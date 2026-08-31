@@ -32,6 +32,7 @@ class FakeGateway:
         self.recovery_match = None
         self.broker_lookup_error = False
         self.send_calls = 0
+        self.send_state = "DONE"
         self.preflight_calls = 0
         self.block_on_second = False
         self.owned_position_snapshot = OwnedPositionSnapshot(
@@ -78,6 +79,9 @@ class FakeGateway:
     def order_send(self, request):
         self.send_calls += 1
         return FakeResult()
+
+    def order_send_state(self, result):
+        return self.send_state
 
     def find_intent_at_broker(self, intent_id):
         if self.broker_lookup_error:
@@ -244,7 +248,34 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.gateway.containment_calls, 0)
         self.assertTrue(result["post_send"]["ok"])
         self.assertTrue(result["actual_fill_safety"]["ok"])
+        self.assertTrue(result["actual_fill_safety"]["protection_match"]["ok"])
         self.assertEqual(result["actual_fill_safety"]["risk_basis"], "PRE_SEND_EQUITY_ACTUAL_FILL_TO_STOP")
+
+    def test_done_partial_never_acknowledges_and_contains(self):
+        self.gateway.send_state = "DONE_PARTIAL"
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("partialret"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "NON_ATOMIC_ORDER_SEND_RESULT:DONE_PARTIAL")
+        self.assertEqual(self.gateway.containment_calls, 1)
+
+    def test_placed_never_acknowledges_and_contains(self):
+        self.gateway.send_state = "PLACED"
+        self.gateway.owned_pending_orders = [SimpleNamespace(ticket=7001)]
+        self.gateway.post_send_exposure = ExposureSnapshot(0, 1, 0.0, 0.01)
+        self.gateway.owned_position_snapshot = None
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("placed"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "NON_ATOMIC_ORDER_SEND_RESULT:PLACED")
+        self.assertEqual(self.gateway.containment_calls, 1)
+
+    def test_immediate_deal_without_stable_position_is_not_acknowledged(self):
+        self.gateway.match_after_send = BrokerMatch(True, "DEAL", 9001, "HISTORICAL")
+        self.gateway.post_send_exposure = ExposureSnapshot(0, 0, 0.0, 0.0)
+        self.gateway.owned_position_snapshot = None
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("dealonly"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "POST_SEND_DEAL_WITHOUT_STABLE_POSITION")
+        self.assertEqual(self.gateway.containment_calls, 1)
 
     def test_actual_fill_operating_risk_breach_is_contained(self):
         self.gateway.actual_stop_loss = 5.5001
@@ -298,6 +329,15 @@ class RuntimeTests(unittest.TestCase):
         result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("notp"))
         self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
         self.assertEqual(result["reason"], "ACTUAL_FILL_UNSAFE:ACTUAL_POSITION_TARGET_MISSING")
+        self.assertEqual(self.gateway.containment_calls, 1)
+
+    def test_broker_altered_stop_is_contained(self):
+        self.gateway.owned_position_snapshot = OwnedPositionSnapshot(
+            123456, "XAUUSD.i", "BUY", 0.01, 3000.2, 2999.1, 3002.2, 1607101, "R7R1:r6_badsl"
+        )
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("badsl"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "ACTUAL_FILL_UNSAFE:ACTUAL_STOP_DIFFERS_FROM_SUBMITTED_STOP")
         self.assertEqual(self.gateway.containment_calls, 1)
 
     def test_containment_failure_still_forces_manual_review(self):
