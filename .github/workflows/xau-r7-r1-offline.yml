@@ -40,3 +40,45 @@ jobs:
       - name: Run offline safety regression
         working-directory: ci_r7
         run: python -m unittest discover -s r7_runtime_tests -v
+
+  windows-runtime-tests:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Parse Windows builder and launcher template
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'xau_r7_r1/BUILD_R7_R1.ps1'),
+            [ref]$null,
+            [ref]$errors
+          )
+          if ($errors.Count -ne 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw 'BUILD_R7_R1.ps1 contains PowerShell parse errors'
+          }
+          if (-not (Test-Path 'xau_r7_r1/START_XAU_R7_R1.bat.template' -PathType Leaf)) {
+            throw 'START_XAU_R7_R1.bat.template missing'
+          }
+      - name: Assemble builder-equivalent runtime tree
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item -Recurse -Force ci_r7 -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force ci_r7/r7_runtime | Out-Null
+          New-Item -ItemType Directory -Force ci_r7/r7_runtime_tests | Out-Null
+          Copy-Item xau_r7_r1/runtime/* ci_r7/r7_runtime/ -Recurse -Force
+          Copy-Item xau_r7_r1/tests/* ci_r7/r7_runtime_tests/ -Recurse -Force
+      - name: Compile R7-R1 runtime on Windows
+        working-directory: ci_r7
+        run: python -m compileall -q r7_runtime r7_runtime_tests
+      - name: Run Windows offline safety regression
+        working-directory: ci_r7
+        run: python -m unittest discover -s r7_runtime_tests -v
