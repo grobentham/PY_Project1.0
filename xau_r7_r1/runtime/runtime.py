@@ -16,7 +16,6 @@ from .mt5_gateway import MT5Gateway
 from .r6_bridge import R6InboxProcessor
 from .r6_integrity import verify_runtime_package_integrity
 
-
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = ROOT / "r7_runtime_state"
 DB_PATH = RUNTIME_DIR / "r7_r1_state.sqlite3"
@@ -39,11 +38,7 @@ def _finite_number(value: Any, name: str) -> float:
 
 
 def load_config() -> Dict[str, Any]:
-    cfg: Dict[str, Any] = {
-        "max_tick_age_seconds": HARD_MAX_TICK_AGE_SECONDS,
-        "max_spread_usd": HARD_MAX_SPREAD_USD,
-        "request_demo_execution": False,
-    }
+    cfg: Dict[str, Any] = {"max_tick_age_seconds": HARD_MAX_TICK_AGE_SECONDS, "max_spread_usd": HARD_MAX_SPREAD_USD, "request_demo_execution": False}
     if CONFIG_PATH.exists():
         user = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         if not isinstance(user, dict):
@@ -91,33 +86,12 @@ def load_intent(path: Path) -> OrderIntent:
     return OrderIntent(raw["client_intent_id"], raw["side"], lot, stop, target, raw["source"])
 
 
-def offline_status(store: AuditStore, integrity: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "version": VERSION,
-        "package_integrity": "PASS",
-        "integrity": integrity,
-        "audit_chain_ok": store.verify_chain(),
-        "demo_execution_requested": cfg["request_demo_execution"],
-        "execution_unlocked": demo_execution_enabled(cfg),
-        "r6_bridge_root": str(BRIDGE_ROOT),
-        "r6_bridge_paused": (BRIDGE_ROOT / "PAUSED_MANUAL_REVIEW").exists(),
-        "final_holdout_accessed": False,
-    }
+def offline_status(store: AuditStore, package_integrity: Dict[str, Any], store_integrity: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return {"version": VERSION, "package_integrity": "PASS", "integrity": package_integrity, "state_integrity": store_integrity, "demo_execution_requested": cfg["request_demo_execution"], "execution_unlocked": demo_execution_enabled(cfg), "r6_bridge_root": str(BRIDGE_ROOT), "r6_bridge_paused": bool(store.get_runtime_state("r6_bridge_manual_review_pause", False)) or (BRIDGE_ROOT / "PAUSED_MANUAL_REVIEW").exists(), "final_holdout_accessed": False}
 
 
-def connected_status(store: AuditStore, gateway: MT5Gateway, cfg: Dict[str, Any], integrity: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "version": VERSION,
-        "package_integrity": "PASS",
-        "integrity": integrity,
-        "audit_chain_ok": store.verify_chain(),
-        "execution_unlocked": demo_execution_enabled(cfg),
-        "account": gateway.account_snapshot().__dict__,
-        "symbol": gateway.symbol_snapshot().__dict__,
-        "exposure": gateway.exposure_snapshot().__dict__,
-        "r6_bridge_root": str(BRIDGE_ROOT),
-        "r6_bridge_paused": (BRIDGE_ROOT / "PAUSED_MANUAL_REVIEW").exists(),
-    }
+def connected_status(store: AuditStore, gateway: MT5Gateway, cfg: Dict[str, Any], package_integrity: Dict[str, Any], store_integrity: Dict[str, Any]) -> Dict[str, Any]:
+    return {"version": VERSION, "package_integrity": "PASS", "integrity": package_integrity, "state_integrity": store_integrity, "execution_unlocked": demo_execution_enabled(cfg), "account": gateway.account_snapshot().__dict__, "symbol": gateway.symbol_snapshot().__dict__, "exposure": gateway.exposure_snapshot().__dict__, "r6_bridge_root": str(BRIDGE_ROOT), "r6_bridge_paused": bool(store.get_runtime_state("r6_bridge_manual_review_pause", False)) or (BRIDGE_ROOT / "PAUSED_MANUAL_REVIEW").exists()}
 
 
 def main() -> None:
@@ -134,21 +108,22 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config()
-    integrity = verify_runtime_package_integrity(ROOT)
+    package_integrity = verify_runtime_package_integrity(ROOT)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-
     with SingleInstanceLock(LOCK_PATH):
         store = AuditStore(DB_PATH)
         gateway = None
         try:
+            # Persistent state is execution authority for idempotency/recovery.
+            # It must agree with its own append-only audit ledger before any MT5 call.
+            store_integrity = store.verify_store_integrity()
             if args.offline_status:
-                print(json.dumps(offline_status(store, integrity, cfg), indent=2, sort_keys=True))
+                print(json.dumps(offline_status(store, package_integrity, store_integrity, cfg), indent=2, sort_keys=True))
                 return
-
             gateway = MT5Gateway(max_tick_age_seconds=cfg["max_tick_age_seconds"], max_spread_usd=cfg["max_spread_usd"])
             gateway.connect()
             if args.status:
-                print(json.dumps(connected_status(store, gateway, cfg, integrity), indent=2, sort_keys=True))
+                print(json.dumps(connected_status(store, gateway, cfg, package_integrity, store_integrity), indent=2, sort_keys=True))
                 return
 
             execution_enabled = demo_execution_enabled(cfg)
