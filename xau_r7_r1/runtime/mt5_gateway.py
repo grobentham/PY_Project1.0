@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .constants import (
     COMMENT_PREFIX,
     COMMISSION_RT_SGD_PER_001_LOT,
     DEMO_ONLY,
+    EMERGENCY_CLOSE_DEVIATION_POINTS,
     HARD_MAX_SPREAD_USD,
     HARD_MAX_TICK_AGE_SECONDS,
     MAGIC,
+    ORDER_DEVIATION_POINTS,
     REQUIRED_ACCOUNT_CURRENCY,
     REQUIRED_BROKER_SERVER_TOKEN,
     SYMBOL,
 )
-from .models import AccountSnapshot, BrokerMatch, ExposureSnapshot, OrderIntent, SymbolSnapshot
+from .models import AccountSnapshot, BrokerMatch, ExposureSnapshot, OrderIntent, OwnedPositionSnapshot, SymbolSnapshot
 
 
 class GatewayError(RuntimeError):
@@ -31,6 +33,8 @@ class MT5Gateway:
         self.max_tick_age_seconds = float(max_tick_age_seconds)
         self.max_spread_usd = float(max_spread_usd)
         self.mt5 = None
+        self.connected_login: Optional[int] = None
+        self.connected_server: Optional[str] = None
 
     def connect(self) -> None:
         try:
@@ -40,23 +44,21 @@ class MT5Gateway:
         if not mt5.initialize():
             raise GatewayError(f"MT5_INITIALIZE_FAILED:{mt5.last_error()}")
         self.mt5 = mt5
-        account = mt5.account_info()
-        if account is None:
+        try:
+            account = mt5.account_info()
+            if account is None:
+                raise GatewayError("MT5_ACCOUNT_INFO_UNAVAILABLE")
+            self._validate_account_identity(account, pin=False)
+            self.connected_login = int(account.login)
+            self.connected_server = str(account.server or "")
+            if not mt5.symbol_select(SYMBOL, True):
+                raise GatewayError(f"SYMBOL_NOT_AVAILABLE:{SYMBOL}")
+            terminal = mt5.terminal_info()
+            if terminal is None or not bool(getattr(terminal, "connected", False)):
+                raise GatewayError("MT5_TERMINAL_NOT_CONNECTED")
+        except Exception:
             self.shutdown()
-            raise GatewayError("MT5_ACCOUNT_INFO_UNAVAILABLE")
-        if str(account.currency).upper() != REQUIRED_ACCOUNT_CURRENCY:
-            self.shutdown()
-            raise GatewayError(f"ACCOUNT_CURRENCY_MISMATCH:{account.currency}")
-        server = str(account.server or "")
-        if REQUIRED_BROKER_SERVER_TOKEN not in server.lower():
-            self.shutdown()
-            raise GatewayError(f"BROKER_SERVER_MISMATCH:{server}")
-        if DEMO_ONLY and "demo" not in server.lower():
-            self.shutdown()
-            raise GatewayError(f"DEMO_ONLY_GUARD:{server}")
-        if not mt5.symbol_select(SYMBOL, True):
-            self.shutdown()
-            raise GatewayError(f"SYMBOL_NOT_AVAILABLE:{SYMBOL}")
+            raise
 
     def shutdown(self) -> None:
         if self.mt5 is not None:
@@ -64,11 +66,39 @@ class MT5Gateway:
                 self.mt5.shutdown()
             finally:
                 self.mt5 = None
+                self.connected_login = None
+                self.connected_server = None
 
     def _require(self):
         if self.mt5 is None:
             raise GatewayError("MT5_NOT_CONNECTED")
         return self.mt5
+
+    def _validate_account_identity(self, account, *, pin: bool = True) -> None:
+        mt5 = self._require()
+        server = str(account.server or "")
+        if str(account.currency).upper() != REQUIRED_ACCOUNT_CURRENCY:
+            raise GatewayError(f"ACCOUNT_CURRENCY_MISMATCH:{account.currency}")
+        if REQUIRED_BROKER_SERVER_TOKEN not in server.lower():
+            raise GatewayError(f"BROKER_SERVER_MISMATCH:{server}")
+        if DEMO_ONLY and "demo" not in server.lower():
+            raise GatewayError(f"DEMO_ONLY_GUARD:{server}")
+        demo_mode = int(getattr(mt5, "ACCOUNT_TRADE_MODE_DEMO", 0))
+        if DEMO_ONLY and int(getattr(account, "trade_mode", -1)) != demo_mode:
+            raise GatewayError(f"ACCOUNT_TRADE_MODE_NOT_DEMO:{getattr(account, 'trade_mode', None)}")
+        if pin and self.connected_login is not None:
+            if int(account.login) != self.connected_login:
+                raise GatewayError(f"ACCOUNT_SWITCH_DETECTED:{self.connected_login}->{account.login}")
+            if self.connected_server is not None and server != self.connected_server:
+                raise GatewayError(f"ACCOUNT_SERVER_SWITCH_DETECTED:{self.connected_server}->{server}")
+
+    def _account_info_checked(self):
+        mt5 = self._require()
+        account = mt5.account_info()
+        if account is None:
+            raise GatewayError("MT5_ACCOUNT_INFO_UNAVAILABLE")
+        self._validate_account_identity(account, pin=True)
+        return account
 
     def _positions(self) -> List:
         mt5 = self._require()
@@ -93,58 +123,84 @@ class MT5Gateway:
             raise GatewayError(f"MT5_HISTORY_DEALS_QUERY_FAILED:{mt5.last_error()}")
         return list(rows)
 
-    def assert_trading_permissions(self) -> None:
+    def _symbol_info_checked(self):
+        mt5 = self._require()
+        info = mt5.symbol_info(SYMBOL)
+        if info is None:
+            raise GatewayError("MT5_SYMBOL_INFO_UNAVAILABLE")
+        return info
+
+    def assert_trading_permissions(self, side: Optional[str] = None, *, for_close: bool = False) -> None:
         mt5 = self._require()
         terminal = mt5.terminal_info()
-        account = mt5.account_info()
-        info = mt5.symbol_info(SYMBOL)
-        if terminal is None or account is None or info is None:
-            raise GatewayError("MT5_TRADING_PERMISSION_STATE_UNAVAILABLE")
+        account = self._account_info_checked()
+        info = self._symbol_info_checked()
+        if terminal is None:
+            raise GatewayError("MT5_TERMINAL_INFO_UNAVAILABLE")
+        if not bool(getattr(terminal, "connected", False)):
+            raise GatewayError("MT5_TERMINAL_NOT_CONNECTED")
+        if bool(getattr(terminal, "tradeapi_disabled", False)):
+            raise GatewayError("MT5_PYTHON_TRADE_API_DISABLED")
         if not bool(getattr(terminal, "trade_allowed", False)):
             raise GatewayError("MT5_TERMINAL_AUTOTRADING_DISABLED")
         if not bool(getattr(account, "trade_allowed", False)):
             raise GatewayError("MT5_ACCOUNT_TRADING_DISABLED")
         if hasattr(account, "trade_expert") and not bool(getattr(account, "trade_expert")):
             raise GatewayError("MT5_ACCOUNT_EXPERT_TRADING_DISABLED")
+
+        trade_mode = int(getattr(info, "trade_mode", -1))
         disabled = int(getattr(mt5, "SYMBOL_TRADE_MODE_DISABLED", 0))
-        if int(getattr(info, "trade_mode", disabled)) == disabled:
+        long_only = int(getattr(mt5, "SYMBOL_TRADE_MODE_LONGONLY", 1))
+        short_only = int(getattr(mt5, "SYMBOL_TRADE_MODE_SHORTONLY", 2))
+        close_only = int(getattr(mt5, "SYMBOL_TRADE_MODE_CLOSEONLY", 3))
+        full = int(getattr(mt5, "SYMBOL_TRADE_MODE_FULL", 4))
+        if trade_mode == disabled:
             raise GatewayError("MT5_SYMBOL_TRADING_DISABLED")
+        if not for_close and trade_mode == close_only:
+            raise GatewayError("MT5_SYMBOL_CLOSE_ONLY")
+        if not for_close:
+            side_u = "" if side is None else str(side).upper()
+            if side_u == "BUY" and trade_mode == short_only:
+                raise GatewayError("MT5_SYMBOL_SHORT_ONLY")
+            if side_u == "SELL" and trade_mode == long_only:
+                raise GatewayError("MT5_SYMBOL_LONG_ONLY")
+            if trade_mode not in {full, long_only, short_only}:
+                raise GatewayError(f"MT5_SYMBOL_TRADE_MODE_UNSUPPORTED:{trade_mode}")
+
+            order_mode = int(getattr(info, "order_mode", 0))
+            market_flag = int(getattr(mt5, "SYMBOL_ORDER_MARKET", 1))
+            sl_flag = int(getattr(mt5, "SYMBOL_ORDER_SL", 16))
+            tp_flag = int(getattr(mt5, "SYMBOL_ORDER_TP", 32))
+            if (order_mode & market_flag) != market_flag:
+                raise GatewayError("MT5_MARKET_ORDERS_NOT_ALLOWED")
+            if (order_mode & sl_flag) != sl_flag:
+                raise GatewayError("MT5_STOP_LOSS_NOT_ALLOWED")
+            if (order_mode & tp_flag) != tp_flag:
+                raise GatewayError("MT5_TAKE_PROFIT_NOT_ALLOWED")
 
     def account_snapshot(self) -> AccountSnapshot:
-        mt5 = self._require()
-        a = mt5.account_info()
-        if a is None:
-            raise GatewayError("MT5_ACCOUNT_INFO_UNAVAILABLE")
+        a = self._account_info_checked()
         equity = float(a.equity)
         balance = float(a.balance)
         margin_free = float(a.margin_free)
         if not all(math.isfinite(v) for v in (equity, balance, margin_free)):
             raise GatewayError("INVALID_ACCOUNT_NUMERIC_STATE")
-        return AccountSnapshot(
-            login=int(a.login),
-            server=str(a.server),
-            currency=str(a.currency),
-            equity_sgd=equity,
-            balance_sgd=balance,
-            margin_free_sgd=margin_free,
-        )
+        return AccountSnapshot(int(a.login), str(a.server), str(a.currency), equity, balance, margin_free)
 
     def symbol_snapshot(self) -> SymbolSnapshot:
         mt5 = self._require()
-        info = mt5.symbol_info(SYMBOL)
+        self._account_info_checked()
+        info = self._symbol_info_checked()
         tick = mt5.symbol_info_tick(SYMBOL)
-        if info is None or tick is None:
-            raise GatewayError("MT5_SYMBOL_OR_TICK_UNAVAILABLE")
+        if tick is None:
+            raise GatewayError("MT5_TICK_UNAVAILABLE")
         tick_ts = float(getattr(tick, "time_msc", 0) or 0) / 1000.0
         if tick_ts <= 0:
             tick_ts = float(tick.time)
         now = datetime.now(timezone.utc).timestamp()
         age = now - tick_ts
         bid, ask = float(tick.bid), float(tick.ask)
-        volume_min = float(info.volume_min)
-        volume_step = float(info.volume_step)
-        volume_max = float(info.volume_max)
-        point = float(info.point)
+        volume_min, volume_step, volume_max, point = float(info.volume_min), float(info.volume_step), float(info.volume_max), float(info.point)
         if not all(math.isfinite(v) for v in (tick_ts, age, bid, ask, volume_min, volume_step, volume_max, point)):
             raise GatewayError("INVALID_SYMBOL_NUMERIC_STATE")
         if age < -2.0 or age > self.max_tick_age_seconds:
@@ -155,32 +211,17 @@ class MT5Gateway:
             raise GatewayError(f"SPREAD_GUARD:{ask - bid:.5f}")
         if volume_min <= 0 or volume_step <= 0 or volume_max < volume_min or point <= 0:
             raise GatewayError("INVALID_BROKER_SYMBOL_GEOMETRY")
-        return SymbolSnapshot(
-            symbol=SYMBOL,
-            bid=bid,
-            ask=ask,
-            tick_time_epoch=tick_ts,
-            tick_age_seconds=age,
-            volume_min=volume_min,
-            volume_step=volume_step,
-            volume_max=volume_max,
-            point=point,
-            trade_stops_level_points=int(info.trade_stops_level),
-        )
+        return SymbolSnapshot(SYMBOL, bid, ask, tick_ts, age, volume_min, volume_step, volume_max, point, int(info.trade_stops_level))
 
     def exposure_snapshot(self) -> ExposureSnapshot:
+        self._account_info_checked()
         positions = self._positions()
         orders = self._orders()
         position_lot = sum(float(p.volume) for p in positions)
         pending_lot = sum(float(o.volume_current) for o in orders)
         if not math.isfinite(position_lot) or not math.isfinite(pending_lot) or position_lot < 0 or pending_lot < 0:
             raise GatewayError("INVALID_BROKER_EXPOSURE_STATE")
-        return ExposureSnapshot(
-            position_count=len(positions),
-            pending_order_count=len(orders),
-            total_position_lot=position_lot,
-            total_pending_lot=pending_lot,
-        )
+        return ExposureSnapshot(len(positions), len(orders), position_lot, pending_lot)
 
     @staticmethod
     def _lot_on_step(lot: float, minimum: float, step: float) -> bool:
@@ -190,8 +231,7 @@ class MT5Gateway:
         return math.isfinite(units) and abs(units - round(units)) <= 1e-9
 
     def validate_broker_geometry(self, intent: OrderIntent, symbol: SymbolSnapshot, entry_price: float) -> None:
-        lot = float(intent.lot)
-        stop = float(intent.stop_price)
+        lot, stop = float(intent.lot), float(intent.stop_price)
         tp = None if intent.take_profit_price is None else float(intent.take_profit_price)
         entry_price = float(entry_price)
         values = [lot, stop, entry_price] + ([] if tp is None else [tp])
@@ -228,29 +268,49 @@ class MT5Gateway:
             return symbol.bid
         raise GatewayError("UNSUPPORTED_SIDE")
 
-    def projected_stop_loss_sgd(self, intent: OrderIntent, entry_price: float) -> float:
+    def _commission_for_lot(self, lot: float) -> float:
+        commission = COMMISSION_RT_SGD_PER_001_LOT * (float(lot) / 0.01)
+        if not math.isfinite(commission) or commission < 0:
+            raise GatewayError("INVALID_COMMISSION_PROJECTION")
+        return commission
+
+    def _calc_stop_loss(self, side: str, lot: float, entry_price: float, stop_price: float) -> float:
         mt5 = self._require()
-        side = intent.side.upper()
-        order_type = mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL if side == "SELL" else None
+        side_u = side.upper()
+        order_type = mt5.ORDER_TYPE_BUY if side_u == "BUY" else mt5.ORDER_TYPE_SELL if side_u == "SELL" else None
         if order_type is None:
             raise GatewayError("UNSUPPORTED_SIDE")
-        pnl = mt5.order_calc_profit(order_type, SYMBOL, float(intent.lot), float(entry_price), float(intent.stop_price))
+        pnl = mt5.order_calc_profit(order_type, SYMBOL, float(lot), float(entry_price), float(stop_price))
         if pnl is None:
             raise GatewayError(f"ORDER_CALC_PROFIT_FAILED:{mt5.last_error()}")
         pnl = float(pnl)
         if not math.isfinite(pnl) or pnl >= 0:
             raise GatewayError(f"INVALID_PROJECTED_STOP_PNL:{pnl}")
-        commission = COMMISSION_RT_SGD_PER_001_LOT * (float(intent.lot) / 0.01)
-        projected = (-pnl) + commission
+        projected = (-pnl) + self._commission_for_lot(lot)
         if not math.isfinite(projected) or projected <= 0:
             raise GatewayError(f"INVALID_PROJECTED_STOP_WITH_COMMISSION:{projected}")
         return projected
 
+    def projected_stop_loss_sgd(self, intent: OrderIntent, entry_price: float) -> float:
+        info = self._symbol_info_checked()
+        point = float(info.point)
+        side = intent.side.upper()
+        # Budget the worst price allowed by the request's frozen deviation before
+        # the send. Market Execution can still differ, so actual fill risk is
+        # independently recomputed after reconciliation.
+        worst_entry = float(entry_price) + ORDER_DEVIATION_POINTS * point if side == "BUY" else float(entry_price) - ORDER_DEVIATION_POINTS * point
+        if worst_entry <= 0 or not math.isfinite(worst_entry):
+            raise GatewayError("INVALID_WORST_CASE_ENTRY")
+        return self._calc_stop_loss(side, intent.lot, worst_entry, intent.stop_price)
+
+    def position_stop_loss_sgd(self, position: OwnedPositionSnapshot) -> float:
+        if position.sl <= 0:
+            raise GatewayError("OWNED_POSITION_MISSING_STOP_LOSS")
+        return self._calc_stop_loss(position.side, position.volume, position.price_open, position.sl)
+
     def _select_filling_mode(self) -> int:
         mt5 = self._require()
-        info = mt5.symbol_info(SYMBOL)
-        if info is None:
-            raise GatewayError("MT5_SYMBOL_INFO_UNAVAILABLE_FOR_FILLING")
+        info = self._symbol_info_checked()
         flags = int(getattr(info, "filling_mode", 0))
         symbol_ioc = int(getattr(mt5, "SYMBOL_FILLING_IOC", 2))
         symbol_fok = int(getattr(mt5, "SYMBOL_FILLING_FOK", 1))
@@ -263,13 +323,15 @@ class MT5Gateway:
             raise GatewayError("NO_SUPPORTED_MARKET_FILLING_MODE")
         return int(mt5.ORDER_FILLING_RETURN)
 
+    def _comment(self, client_intent_id: str) -> str:
+        return (COMMENT_PREFIX + client_intent_id)[:31]
+
     def build_market_request(self, intent: OrderIntent, entry_price: float) -> Dict:
         mt5 = self._require()
         side = intent.side.upper()
         order_type = mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL if side == "SELL" else None
         if order_type is None:
             raise GatewayError("UNSUPPORTED_SIDE")
-        comment = (COMMENT_PREFIX + intent.client_intent_id)[:31]
         return {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": SYMBOL,
@@ -278,16 +340,17 @@ class MT5Gateway:
             "price": float(entry_price),
             "sl": float(intent.stop_price),
             "tp": float(intent.take_profit_price or 0.0),
-            "deviation": 10,
+            "deviation": ORDER_DEVIATION_POINTS,
             "magic": MAGIC,
-            "comment": comment,
+            "comment": self._comment(intent.client_intent_id),
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": self._select_filling_mode(),
         }
 
     def order_check(self, request: Dict):
         mt5 = self._require()
-        self.assert_trading_permissions()
+        side = "BUY" if int(request.get("type", -1)) == int(mt5.ORDER_TYPE_BUY) else "SELL"
+        self.assert_trading_permissions(side)
         check = mt5.order_check(request)
         if check is None:
             raise GatewayError(f"ORDER_CHECK_NONE:{mt5.last_error()}")
@@ -297,7 +360,8 @@ class MT5Gateway:
 
     def order_send(self, request: Dict):
         mt5 = self._require()
-        self.assert_trading_permissions()
+        side = "BUY" if int(request.get("type", -1)) == int(mt5.ORDER_TYPE_BUY) else "SELL"
+        self.assert_trading_permissions(side)
         result = mt5.order_send(request)
         if result is None:
             raise GatewayError(f"ORDER_SEND_NONE:{mt5.last_error()}")
@@ -306,8 +370,82 @@ class MT5Gateway:
             raise GatewayError(f"ORDER_SEND_REJECTED:{result.retcode}:{result.comment}")
         return result
 
+    def owned_positions(self, client_intent_id: str) -> List[OwnedPositionSnapshot]:
+        needle = self._comment(client_intent_id)
+        out: List[OwnedPositionSnapshot] = []
+        mt5 = self._require()
+        for p in self._positions():
+            if int(getattr(p, "magic", 0)) != MAGIC or str(getattr(p, "comment", "")) != needle:
+                continue
+            side = "BUY" if int(p.type) == int(mt5.POSITION_TYPE_BUY) else "SELL"
+            values = [float(p.volume), float(p.price_open), float(p.sl), float(p.tp)]
+            if not all(math.isfinite(v) for v in values):
+                raise GatewayError("OWNED_POSITION_NUMERIC_STATE_INVALID")
+            out.append(OwnedPositionSnapshot(int(p.ticket), str(p.symbol), side, values[0], values[1], values[2], values[3], int(p.magic), str(getattr(p, "comment", ""))))
+        return out
+
+    def owned_orders(self, client_intent_id: str) -> List:
+        needle = self._comment(client_intent_id)
+        return [o for o in self._orders() if int(getattr(o, "magic", 0)) == MAGIC and str(getattr(o, "comment", "")) == needle]
+
+    def owned_position(self, client_intent_id: str) -> Optional[OwnedPositionSnapshot]:
+        rows = self.owned_positions(client_intent_id)
+        if len(rows) > 1:
+            raise GatewayError("MULTIPLE_OWNED_POSITIONS_FOR_ONE_INTENT")
+        return rows[0] if rows else None
+
+    def emergency_flatten_owned_intent(self, client_intent_id: str) -> Dict:
+        """Best-effort fail-closed containment for this runtime's own intent only.
+
+        Never touches unrelated XAU positions/orders. A remaining owned position or
+        order after the attempt is reported as failure and must keep the bridge paused.
+        """
+        mt5 = self._require()
+        self.assert_trading_permissions(for_close=True)
+        cancelled, closed = [], []
+        for order in self.owned_orders(client_intent_id):
+            request = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(order.ticket), "symbol": SYMBOL, "magic": MAGIC, "comment": "R7R1:EMERGENCY_CANCEL"[:31]}
+            result = mt5.order_send(request)
+            if result is None or int(result.retcode) != int(mt5.TRADE_RETCODE_DONE):
+                raise GatewayError(f"EMERGENCY_CANCEL_FAILED:{getattr(result, 'retcode', None)}:{getattr(result, 'comment', '')}")
+            cancelled.append(int(order.ticket))
+
+        for position in self.owned_positions(client_intent_id):
+            snap = self.symbol_snapshot()
+            if position.side == "BUY":
+                order_type, price = mt5.ORDER_TYPE_SELL, snap.bid
+            else:
+                order_type, price = mt5.ORDER_TYPE_BUY, snap.ask
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "position": int(position.ticket),
+                "symbol": SYMBOL,
+                "volume": float(position.volume),
+                "type": order_type,
+                "price": float(price),
+                "deviation": EMERGENCY_CLOSE_DEVIATION_POINTS,
+                "magic": MAGIC,
+                "comment": "R7R1:EMERGENCY_FLAT"[:31],
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": self._select_filling_mode(),
+            }
+            result = mt5.order_send(request)
+            if result is None or int(result.retcode) not in {int(mt5.TRADE_RETCODE_DONE), int(mt5.TRADE_RETCODE_DONE_PARTIAL)}:
+                raise GatewayError(f"EMERGENCY_CLOSE_FAILED:{getattr(result, 'retcode', None)}:{getattr(result, 'comment', '')}")
+            closed.append(int(position.ticket))
+
+        remaining_positions = self.owned_positions(client_intent_id)
+        remaining_orders = self.owned_orders(client_intent_id)
+        return {
+            "ok": not remaining_positions and not remaining_orders,
+            "cancelled_orders": cancelled,
+            "close_attempted_positions": closed,
+            "remaining_owned_positions": [p.ticket for p in remaining_positions],
+            "remaining_owned_orders": [int(o.ticket) for o in remaining_orders],
+        }
+
     def find_intent_at_broker(self, client_intent_id: str) -> BrokerMatch:
-        needle = (COMMENT_PREFIX + client_intent_id)[:31]
+        needle = self._comment(client_intent_id)
         for p in self._positions():
             if int(p.magic) == MAGIC and str(getattr(p, "comment", "")) == needle:
                 return BrokerMatch(True, "POSITION", int(p.ticket), "OPEN")
