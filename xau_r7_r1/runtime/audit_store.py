@@ -16,7 +16,14 @@ class StoreError(RuntimeError):
 
 
 _ALLOWED_TRANSITIONS = {
-    "RESERVED": {"PREFLIGHT_OK", "BLOCKED", "ABANDONED_BEFORE_SEND", "FAILED_SAFE"},
+    "RESERVED": {
+        "PREFLIGHT_OK",
+        "BLOCKED",
+        "ABANDONED_BEFORE_SEND",
+        "ACKNOWLEDGED",
+        "MANUAL_REVIEW_NO_RESUBMIT",
+        "FAILED_SAFE",
+    },
     "PREFLIGHT_OK": {"DRY_RUN_COMPLETE", "SUBMITTING", "ABANDONED_BEFORE_SEND", "FAILED_SAFE"},
     "SUBMITTING": {"SUBMITTED", "ACKNOWLEDGED", "MANUAL_REVIEW_NO_RESUBMIT", "FAILED_SAFE"},
     "SUBMITTED": {"ACKNOWLEDGED", "MANUAL_REVIEW_NO_RESUBMIT", "FAILED_SAFE"},
@@ -109,8 +116,6 @@ class AuditStore:
             ).fetchone()
             if row is not None:
                 if row[0] != payload_hash:
-                    # Commit the collision event first, then raise outside this
-                    # transaction so the evidence is not rolled back with the error.
                     self._append_locked(
                         "INTENT_IDEMPOTENCY_COLLISION",
                         {
