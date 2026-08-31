@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from r7_runtime.audit_store import AuditStore
-from r7_runtime.constants import CANONICAL_R6_ZIP_SHA256
+from r7_runtime.constants import CANONICAL_R6_ZIP_SHA256, R6_BRIDGE_PAUSE_STATE_KEY, R6_BRIDGE_RESUME_ACK
 from r7_runtime.models import AccountSnapshot, BrokerMatch, ExposureSnapshot, SymbolSnapshot
-from r7_runtime.r6_bridge import R6InboxProcessor
-
+from r7_runtime.r6_bridge import BridgeError, MAX_DECISION_FILE_BYTES, R6InboxProcessor
 
 NOW = 1_800_000_000_000
 
@@ -92,12 +92,19 @@ class BridgeTests(unittest.TestCase):
             p.write_text(json.dumps(obj), encoding="utf-8")
         return p
 
+    def make_ambiguous_bridge(self, suffix="2"):
+        self.store.close()
+        self.store = AuditStore(self.root / ("state" + suffix + ".sqlite3"))
+        self.gateway = Gateway()
+        self.gateway.after_match = BrokerMatch(False)
+        self.bridge = R6InboxProcessor(self.root / ("bridge" + suffix), self.store, self.gateway, execution_enabled=True)
+
     def test_valid_decision_dry_run_is_archived_processed(self):
         p = self.put("a.json", payload())
         result = self.bridge.process_path(p, now_ms=NOW)
         self.assertEqual(result["state"], "DRY_RUN_COMPLETE")
         self.assertFalse(p.exists())
-        self.assertTrue(Path(result["archived_to"]).parent.name == "processed")
+        self.assertEqual(Path(result["archived_to"]).parent.name, "processed")
         self.assertEqual(self.gateway.send_calls, 0)
 
     def test_bad_json_is_quarantined_without_broker_send(self):
@@ -107,43 +114,83 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(Path(result["archived_to"]).parent.name, "rejected")
         self.assertEqual(self.gateway.send_calls, 0)
 
+    def test_oversized_decision_is_rejected_before_parse(self):
+        p = self.put("huge.json", b"x" * (MAX_DECISION_FILE_BYTES + 1))
+        with self.assertRaisesRegex(BridgeError, "SIZE"):
+            self.bridge.process_path(p, now_ms=NOW)
+        self.assertEqual(self.gateway.send_calls, 0)
+
+    def test_file_outside_inbox_is_rejected(self):
+        p = self.root / "outside.json"
+        p.write_text(json.dumps(payload()), encoding="utf-8")
+        with self.assertRaisesRegex(BridgeError, "DIRECT_CHILD"):
+            self.bridge.process_path(p, now_ms=NOW)
+
+    @unittest.skipIf(os.name == "nt", "symlink creation may require elevated Windows privileges")
+    def test_symlink_inbox_entry_is_rejected(self):
+        target = self.root / "target.json"
+        target.write_text(json.dumps(payload()), encoding="utf-8")
+        link = self.bridge.inbox / "link.json"
+        link.symlink_to(target)
+        with self.assertRaisesRegex(BridgeError, "SYMLINK"):
+            self.bridge.process_path(link, now_ms=NOW)
+
     def test_duplicate_same_decision_is_suppressed(self):
-        first = self.put("one.json", payload("same"))
-        self.bridge.process_path(first, now_ms=NOW)
-        second = self.put("two.json", payload("same"))
-        result = self.bridge.process_path(second, now_ms=NOW)
+        self.bridge.process_path(self.put("one.json", payload("same")), now_ms=NOW)
+        result = self.bridge.process_path(self.put("two.json", payload("same")), now_ms=NOW)
         self.assertEqual(result["state"], "DUPLICATE_SUPPRESSED")
         self.assertEqual(self.gateway.send_calls, 0)
 
     def test_same_id_changed_frozen_payload_causes_manual_review_not_send(self):
-        first = self.put("one.json", payload("collision"))
-        self.bridge.process_path(first, now_ms=NOW)
-        second = self.put("two.json", payload("collision", atr_usd=2.1))
-        result = self.bridge.process_path(second, now_ms=NOW)
+        self.bridge.process_path(self.put("one.json", payload("collision")), now_ms=NOW)
+        result = self.bridge.process_path(self.put("two.json", payload("collision", atr_usd=2.1)), now_ms=NOW)
         self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
-        self.assertTrue(self.bridge.pause_marker.exists())
+        self.assertTrue(self.bridge.is_paused())
         self.assertEqual(self.gateway.send_calls, 0)
 
-    def test_ambiguous_send_pauses_inbox_and_never_auto_resubmits(self):
-        self.store.close()
-        self.store = AuditStore(self.root / "state2.sqlite3")
-        self.gateway.after_match = BrokerMatch(False)
-        self.bridge = R6InboxProcessor(self.root / "bridge2", self.store, self.gateway, execution_enabled=True)
-        p = self.put("send.json", payload("ambiguous"))
-        result = self.bridge.process_path(p, now_ms=NOW)
+    def test_ambiguous_send_persists_pause_in_sqlite(self):
+        self.make_ambiguous_bridge()
+        result = self.bridge.process_path(self.put("send.json", payload("ambiguous")), now_ms=NOW)
         self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
         self.assertEqual(self.gateway.send_calls, 1)
         self.assertTrue(self.bridge.pause_marker.exists())
-        later = self.put("later.json", payload("later"))
-        with self.assertRaisesRegex(Exception, "PAUSED"):
-            self.bridge.process_path(later, now_ms=NOW)
+        self.assertTrue(self.store.get_runtime_state(R6_BRIDGE_PAUSE_STATE_KEY, False))
+        self.bridge.pause_marker.unlink()
+        self.assertTrue(self.bridge.is_paused())
+        with self.assertRaisesRegex(BridgeError, "PAUSED"):
+            self.bridge.process_path(self.put("later.json", payload("later")), now_ms=NOW)
         self.assertEqual(self.gateway.send_calls, 1)
 
+    def test_wrong_resume_ack_is_rejected(self):
+        self.store.set_runtime_state(R6_BRIDGE_PAUSE_STATE_KEY, {"reason": "test"})
+        with self.assertRaisesRegex(BridgeError, "ACKNOWLEDGEMENT"):
+            self.bridge.clear_pause("wrong")
+
+    def test_resume_rejected_with_xau_exposure(self):
+        self.store.set_runtime_state(R6_BRIDGE_PAUSE_STATE_KEY, {"reason": "test"})
+        self.gateway.send_calls = 1
+        self.gateway.after_exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
+        with self.assertRaisesRegex(BridgeError, "EXPOSURE"):
+            self.bridge.clear_pause(R6_BRIDGE_RESUME_ACK)
+
+    def test_resume_rejected_with_inflight_intent(self):
+        self.store.set_runtime_state(R6_BRIDGE_PAUSE_STATE_KEY, {"reason": "test"})
+        self.store.reserve_intent("open", {"client_intent_id": "open"})
+        with self.assertRaisesRegex(BridgeError, "INFLIGHT"):
+            self.bridge.clear_pause(R6_BRIDGE_RESUME_ACK)
+
+    def test_valid_resume_requires_zero_exposure_and_clears_both_records(self):
+        self.store.set_runtime_state(R6_BRIDGE_PAUSE_STATE_KEY, {"reason": "reviewed"})
+        self.bridge.pause_marker.write_text("{}", encoding="utf-8")
+        self.gateway.send_calls = 0
+        result = self.bridge.clear_pause(R6_BRIDGE_RESUME_ACK)
+        self.assertTrue(result["cleared"])
+        self.assertFalse(self.bridge.pause_marker.exists())
+        self.assertFalse(self.store.get_runtime_state(R6_BRIDGE_PAUSE_STATE_KEY, True))
+        self.assertFalse(self.bridge.is_paused())
+
     def test_drain_stops_after_manual_review(self):
-        self.store.close()
-        self.store = AuditStore(self.root / "state3.sqlite3")
-        self.gateway.after_match = BrokerMatch(False)
-        self.bridge = R6InboxProcessor(self.root / "bridge3", self.store, self.gateway, execution_enabled=True)
+        self.make_ambiguous_bridge("3")
         self.put("01.json", payload("ambiguous-drain"))
         self.put("02.json", payload("must-not-send"))
         results = self.bridge.drain_once(now_ms=NOW)
