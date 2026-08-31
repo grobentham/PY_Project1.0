@@ -20,8 +20,10 @@ def build_r6(root, **kwargs):
 '''
 
 R5 = '''\
+THRESHOLD = 0.975
+
 def build_r5_universe(root):
-    return [], {}
+    return [], {"threshold": THRESHOLD}
 
 def simulate_r5(universe, fallback_map=None, **kwargs):
     return []
@@ -53,12 +55,30 @@ class R6SourceProbeTests(unittest.TestCase):
             self.make_tree(root)
             report = probe_frozen_r6_source(root)
             self.assertTrue(report["source_only_probe"])
+            self.assertTrue(report["normalized_ast_source_included"])
             self.assertTrue(report["required_engine_contract_present"])
             self.assertFalse(report["producer_admitted"])
             self.assertFalse(report["final_holdout_accessed"])
             self.assertFalse(report["strategy_executed"])
             r6_functions = {f["name"] for f in report["files"]["v16r6/engine.py"]["functions"]}
             self.assertEqual({"build_r6_universe", "build_r6"}, r6_functions)
+
+    def test_probe_exports_normalized_source_call_graph_and_ast_hashes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.make_tree(root)
+            report = probe_frozen_r6_source(root)
+            r6 = report["files"]["v16r6/engine.py"]
+            by_name = {f["name"]: f for f in r6["functions"]}
+            build = by_name["build_r6"]
+            self.assertIn("build_r6_universe", build["calls"])
+            self.assertIn("simulate_r5", build["calls"])
+            self.assertIn("return simulate_r5", build["normalized_source"])
+            self.assertEqual(len(build["ast_sha256"]), 64)
+            self.assertGreater(build["lineno"], 0)
+            self.assertGreaterEqual(build["end_lineno"], build["lineno"])
+            self.assertEqual(r6["assigned_expressions"]["RETIRED_SOURCE"], "'AUX_RF_LTM'")
+            self.assertEqual(report["files"]["v16r5/engine.py"]["assigned_expressions"]["THRESHOLD"], "0.975")
 
     def test_missing_required_r5_function_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
