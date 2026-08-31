@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -75,10 +76,30 @@ class StateIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(StoreError, "BROKER_TICKET_LEDGER_MISMATCH"):
             self.store.verify_store_integrity()
 
+    def test_injected_broker_ticket_when_ledger_has_none_is_detected(self):
+        self.reserve()
+        self.store.conn.execute("UPDATE order_intents SET broker_ticket=999 WHERE client_intent_id='a'")
+        with self.assertRaisesRegex(StoreError, "BROKER_TICKET_LEDGER_MISMATCH"):
+            self.store.verify_store_integrity()
+
     def test_runtime_state_tamper_is_detected(self):
         self.store.set_runtime_state("pause", {"enabled": True})
         self.store.conn.execute("UPDATE runtime_state SET value_json=? WHERE key='pause'", ('{"enabled":false}',))
         with self.assertRaisesRegex(StoreError, "RUNTIME_STATE_LEDGER_MISMATCH"):
+            self.store.verify_store_integrity()
+
+    def test_deleted_audited_runtime_state_row_is_detected(self):
+        self.store.set_runtime_state("r6_bridge_manual_review_pause", {"reason": "unsafe"})
+        self.store.conn.execute("DELETE FROM runtime_state WHERE key='r6_bridge_manual_review_pause'")
+        with self.assertRaisesRegex(StoreError, "RUNTIME_STATE_LEDGER_KEY_SET_MISMATCH"):
+            self.store.verify_store_integrity()
+
+    def test_injected_unaudited_runtime_state_row_is_detected(self):
+        self.store.conn.execute(
+            "INSERT INTO runtime_state(key,value_json,updated_utc) VALUES(?,?,?)",
+            ("evil", "true", time.time()),
+        )
+        with self.assertRaisesRegex(StoreError, "RUNTIME_STATE_LEDGER_KEY_SET_MISMATCH"):
             self.store.verify_store_integrity()
 
     def test_audit_payload_tamper_is_detected(self):
@@ -97,8 +118,6 @@ class StateIntegrityTests(unittest.TestCase):
     def test_transition_ledger_discontinuity_detected_even_if_chain_rehashed_not_attempted(self):
         self.reserve()
         self.store.transition("a", "PREFLIGHT_OK")
-        # Direct state mutation already proves the replay gate is independent of
-        # SQLite structural validity and catches semantic persistence corruption.
         self.store.conn.execute("UPDATE order_intents SET state='RESERVED' WHERE client_intent_id='a'")
         with self.assertRaisesRegex(StoreError, "STATE_LEDGER_MISMATCH"):
             self.store.verify_store_integrity()
