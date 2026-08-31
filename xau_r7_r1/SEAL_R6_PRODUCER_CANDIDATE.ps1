@@ -29,6 +29,14 @@ function Invoke-Python($Python, [string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { Fail ('Python command failed: ' + ($Arguments -join ' ')) }
 }
 
+function Resolve-RuntimeToolSource {
+    $Dev = Join-Path $Here 'runtime'
+    if (Test-Path -LiteralPath $Dev -PathType Container) { return $Dev }
+    $Packaged = Join-Path $Here 'r7_runtime'
+    if (Test-Path -LiteralPath $Packaged -PathType Container) { return $Packaged }
+    Fail 'R7 runtime tool source not found. Expected runtime\ or r7_runtime\ beside this script.'
+}
+
 $RuntimeRoot = (Resolve-Path -LiteralPath $RuntimeRoot).Path
 $CandidateRoot = (Resolve-Path -LiteralPath $CandidateRoot).Path
 if (!(Test-Path -LiteralPath $RuntimeRoot -PathType Container)) { Fail 'RuntimeRoot must be an extracted R7-R1 runtime directory' }
@@ -44,10 +52,11 @@ elseif (-not [System.IO.Path]::IsPathRooted($Output)) {
 }
 
 $Python = Find-Python
+$RuntimeSource = Resolve-RuntimeToolSource
 New-Item -ItemType Directory -Path $RuntimeStage -Force | Out-Null
 
 try {
-    Copy-Item -Path (Join-Path $Here 'runtime\*') -Destination $RuntimeStage -Recurse -Force
+    Copy-Item -Path (Join-Path $RuntimeSource '*') -Destination $RuntimeStage -Recurse -Force
     Push-Location $Work
     try {
         Invoke-Python $Python @(
