@@ -20,7 +20,10 @@ class FakeGateway:
         self.equity = 1000.0
         self.exposure = ExposureSnapshot(0, 0, 0.0, 0.0)
         self.post_send_exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
-        self.match = BrokerMatch(True, "POSITION", 123456, "OPEN")
+        self.match_before_send = BrokerMatch(False)
+        self.match_after_send = BrokerMatch(True, "POSITION", 123456, "OPEN")
+        self.recovery_match = None
+        self.broker_lookup_error = False
         self.send_calls = 0
         self.preflight_calls = 0
         self.block_on_second = False
@@ -33,7 +36,7 @@ class FakeGateway:
 
     def exposure_snapshot(self):
         self.preflight_calls += 1
-        if self.send_calls > 0:
+        if self.send_calls > 0 or (self.recovery_match is not None and self.recovery_match.found):
             return self.post_send_exposure
         if self.block_on_second and self.preflight_calls >= 2:
             return ExposureSnapshot(1, 0, 0.01, 0.0)
@@ -64,7 +67,13 @@ class FakeGateway:
         return FakeResult()
 
     def find_intent_at_broker(self, intent_id):
-        return self.match
+        if self.broker_lookup_error:
+            raise RuntimeError("BROKER_QUERY_FAILED")
+        if self.recovery_match is not None:
+            return self.recovery_match
+        if self.send_calls > 0:
+            return self.match_after_send
+        return self.match_before_send
 
 
 def intent(intent_id="abc", loss_source="BASE", lot=0.01):
@@ -136,7 +145,7 @@ class RuntimeTests(unittest.TestCase):
         result = engine.submit(intent())
         self.assertEqual(result["reason"], "EXISTING_XAU_EXPOSURE_BLOCK")
 
-    def test_duplicate_submit_is_suppressed(self):
+    def test_duplicate_submit_is_suppressed_locally(self):
         engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
         first = engine.submit(intent("same"))
         second = engine.submit(intent("same"))
@@ -144,11 +153,31 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(second["duplicate_suppressed"])
         self.assertEqual(self.gateway.send_calls, 0)
 
-    def test_idempotency_collision_fails(self):
+    def test_broker_side_duplicate_is_acknowledged_without_send(self):
+        self.gateway.match_before_send = BrokerMatch(True, "DEAL", 991, "HISTORICAL")
+        self.gateway.post_send_exposure = ExposureSnapshot(0, 0, 0.0, 0.0)
+        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
+        result = engine.submit(intent("brokerdup"))
+        self.assertEqual(result["state"], "ACKNOWLEDGED")
+        self.assertEqual(self.gateway.send_calls, 0)
+
+    def test_broker_duplicate_query_failure_fails_safe(self):
+        self.gateway.broker_lookup_error = True
+        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
+        result = engine.submit(intent("lookuperr"))
+        self.assertEqual(result["state"], "FAILED_SAFE")
+        self.assertEqual(self.gateway.send_calls, 0)
+
+    def test_idempotency_collision_fails_and_is_audited(self):
         self.store.reserve_intent("same", intent("same").canonical_payload())
         changed = intent("same", lot=0.02).canonical_payload()
         with self.assertRaises(StoreError):
             self.store.reserve_intent("same", changed)
+        count = self.store.conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_type='INTENT_IDEMPOTENCY_COLLISION'"
+        ).fetchone()[0]
+        self.assertEqual(count, 1)
+        self.assertTrue(self.store.verify_chain())
 
     def test_second_preflight_exposure_change_prevents_send(self):
         self.gateway.block_on_second = True
@@ -179,12 +208,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
         self.assertEqual(result["reason"], "POST_SEND_MAX_EXPOSURE_BREACH")
 
+    def test_post_send_reconciliation_failure_never_resubmits(self):
+        class ReconcileFailGateway(FakeGateway):
+            def find_intent_at_broker(self, intent_id):
+                if self.send_calls > 0:
+                    raise RuntimeError("RECONCILIATION_UNAVAILABLE")
+                return BrokerMatch(False)
+        gw = ReconcileFailGateway()
+        engine = ExecutionEngine(self.store, gw, execution_enabled=True)
+        result = engine.submit(intent("reconfail"))
+        self.assertEqual(gw.send_calls, 1)
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+
     def test_restart_never_resubmits_ambiguous_send(self):
         payload = intent("crash").canonical_payload()
         self.store.reserve_intent("crash", payload)
         self.store.transition("crash", "PREFLIGHT_OK")
         self.store.transition("crash", "SUBMITTING")
-        self.gateway.match = BrokerMatch(False)
+        self.gateway.recovery_match = BrokerMatch(False)
         engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
         recovered = engine.recover_inflight()
         self.assertEqual(recovered[0]["state"], "MANUAL_REVIEW_NO_RESUBMIT")
@@ -195,13 +236,12 @@ class RuntimeTests(unittest.TestCase):
         self.store.reserve_intent("recover", payload)
         self.store.transition("recover", "PREFLIGHT_OK")
         self.store.transition("recover", "SUBMITTING")
+        self.gateway.recovery_match = BrokerMatch(True, "POSITION", 123456, "OPEN")
         self.gateway.post_send_exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
-        # Simulate an already-existing broker position without calling order_send now.
-        self.gateway.send_calls = 1
         engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
         recovered = engine.recover_inflight()
         self.assertEqual(recovered[0]["state"], "ACKNOWLEDGED")
-        self.assertEqual(self.gateway.send_calls, 1)
+        self.assertEqual(self.gateway.send_calls, 0)
 
     def test_audit_chain_verifies(self):
         self.store.append_event("A", {"x": 1})
