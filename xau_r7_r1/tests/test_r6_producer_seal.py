@@ -12,6 +12,7 @@ from r7_runtime.r6_producer_seal import (
     ALLOWED_CANDIDATE_FILES,
     GENERATED_SEAL_FILENAME,
     PRODUCER_MODULE_RELATIVE,
+    SEAL_VERSION,
     ProducerSealError,
     seal_candidate,
 )
@@ -49,12 +50,17 @@ class ProducerSealTests(unittest.TestCase):
             elif relative.endswith(".jsonl"):
                 path.write_text("{}\n", encoding="utf-8")
             else:
-                path.write_text("def produce(prefix):\n    return prefix\n", encoding="utf-8")
+                path.write_text('def produce(prefix):\n    return prefix.get("decision")\n', encoding="utf-8")
 
     def admission(self):
         return {
-            "admission_version": "TEST_ADMISSION",
+            "admission_version": "TEST_ADMISSION_V4",
             "ready": True,
+            "trusted_replay": {"deterministic_double_run": True},
+            "parity": {
+                "trusted_producer_replay_pass": True,
+                "producer_source_policy_pass": True,
+            },
             "final_holdout_accessed": False,
             "strategy_retuned": False,
         }
@@ -71,11 +77,16 @@ class ProducerSealTests(unittest.TestCase):
             with mock.patch("r7_runtime.r6_producer_seal.verify_producer_admission", return_value=self.admission()) as verify:
                 result = seal_candidate(base, candidate)
 
+            self.assertEqual(result["seal_version"], SEAL_VERSION)
             self.assertTrue(result["admission_ready"])
+            self.assertTrue(result["trusted_producer_replay_pass"])
+            self.assertTrue(result["producer_source_policy_pass"])
             self.assertFalse(result["baseline_mutated"])
             self.assertFalse(result["execution_unlocked"])
             self.assertEqual(result["producer_module"], PRODUCER_MODULE_RELATIVE)
             self.assertEqual(result["producer_module_sha256"], sha256_file(candidate / PRODUCER_MODULE_RELATIVE))
+            self.assertEqual(result["fixture_corpus_sha256"], sha256_file(candidate / "R7_R1_R6_PARITY_FIXTURES.jsonl"))
+            self.assertEqual(result["producer_replay_attestation_sha256"], sha256_file(candidate / "R7_R1_R6_PRODUCER_REPLAY.json"))
             self.assertEqual(sha256_file(base / "R7_R1_PARENT_INTEGRITY.json"), before_parent)
             for relative, digest in protected.items():
                 self.assertEqual(sha256_file(base / relative), digest)
@@ -108,14 +119,14 @@ class ProducerSealTests(unittest.TestCase):
             with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_UNEXPECTED_FILES"):
                 seal_candidate(base, candidate)
 
-    def test_missing_candidate_evidence_is_rejected(self):
+    def test_missing_trusted_replay_evidence_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td) / "baseline"
             candidate = Path(td) / "candidate"
             base.mkdir(); candidate.mkdir()
             self.build_baseline(base)
             self.build_candidate(candidate)
-            (candidate / "R7_R1_R6_PRODUCER_PARITY.json").unlink()
+            (candidate / "R7_R1_R6_PRODUCER_REPLAY.json").unlink()
             with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_REQUIRED_FILES_MISSING"):
                 seal_candidate(base, candidate)
 
@@ -128,9 +139,22 @@ class ProducerSealTests(unittest.TestCase):
             self.build_candidate(candidate)
             with mock.patch(
                 "r7_runtime.r6_producer_seal.verify_producer_admission",
-                side_effect=RuntimeError("PARITY_MISMATCH"),
+                side_effect=RuntimeError("TRUSTED_REPLAY_MISMATCH"),
             ):
-                with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_ADMISSION_FAILED:PARITY_MISMATCH"):
+                with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_ADMISSION_FAILED:TRUSTED_REPLAY_MISMATCH"):
+                    seal_candidate(base, candidate)
+
+    def test_admission_without_replay_proof_cannot_be_sealed(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "baseline"
+            candidate = Path(td) / "candidate"
+            base.mkdir(); candidate.mkdir()
+            self.build_baseline(base)
+            self.build_candidate(candidate)
+            bad = self.admission()
+            bad["trusted_replay"] = {"deterministic_double_run": False}
+            with mock.patch("r7_runtime.r6_producer_seal.verify_producer_admission", return_value=bad):
+                with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_TRUSTED_REPLAY_NOT_PROVEN"):
                     seal_candidate(base, candidate)
 
     def test_baseline_with_readiness_already_flipped_is_rejected(self):
