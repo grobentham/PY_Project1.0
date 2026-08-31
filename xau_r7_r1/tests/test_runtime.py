@@ -17,20 +17,24 @@ class FakeResult:
 class FakeGateway:
     def __init__(self):
         self.loss = 5.0
+        self.equity = 1000.0
         self.exposure = ExposureSnapshot(0, 0, 0.0, 0.0)
+        self.post_send_exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
         self.match = BrokerMatch(True, "POSITION", 123456, "OPEN")
         self.send_calls = 0
         self.preflight_calls = 0
         self.block_on_second = False
 
     def account_snapshot(self):
-        return AccountSnapshot(1, "BlueberryMarkets-Demo", "SGD", 1000.0, 1000.0, 1000.0)
+        return AccountSnapshot(1, "BlueberryMarkets-Demo", "SGD", self.equity, self.equity, self.equity)
 
     def symbol_snapshot(self):
         return SymbolSnapshot("XAUUSD.i", 3000.0, 3000.2, 1.0, 0.1, 0.01, 0.01, 100.0, 0.01, 0)
 
     def exposure_snapshot(self):
         self.preflight_calls += 1
+        if self.send_calls > 0:
+            return self.post_send_exposure
         if self.block_on_second and self.preflight_calls >= 2:
             return ExposureSnapshot(1, 0, 0.01, 0.0)
         return self.exposure
@@ -83,6 +87,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result["state"], "DRY_RUN_COMPLETE")
         self.assertEqual(self.gateway.send_calls, 0)
 
+    def test_exact_operating_cap_is_allowed(self):
+        self.gateway.loss = 5.5
+        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
+        result = engine.submit(intent())
+        self.assertEqual(result["state"], "DRY_RUN_COMPLETE")
+
     def test_operating_cap_blocks(self):
         self.gateway.loss = 5.5001
         engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
@@ -96,13 +106,32 @@ class RuntimeTests(unittest.TestCase):
         result = engine.submit(intent())
         self.assertEqual(result["reason"], "CONSTITUTIONAL_RISK_CEILING_BREACH")
 
+    def test_projected_equity_floor_blocks(self):
+        self.gateway.equity = 850.1
+        self.gateway.loss = 0.2
+        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
+        result = engine.submit(intent())
+        self.assertEqual(result["reason"], "PROJECTED_EQUITY_FLOOR_BREACH")
+
+    def test_max_lot_blocks_003(self):
+        self.gateway.loss = 1.0
+        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
+        result = engine.submit(intent(lot=0.03))
+        self.assertEqual(result["reason"], "MAX_CANONICAL_EXPOSURE_EXCEEDED")
+
     def test_retired_source_blocks(self):
         engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
         result = engine.submit(intent(loss_source="AUX_RF_LTM"))
         self.assertEqual(result["reason"], "RETIRED_SOURCE_AUX_RF_LTM")
 
-    def test_existing_exposure_blocks(self):
+    def test_existing_position_blocks(self):
         self.gateway.exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
+        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
+        result = engine.submit(intent())
+        self.assertEqual(result["reason"], "EXISTING_XAU_EXPOSURE_BLOCK")
+
+    def test_existing_pending_order_blocks(self):
+        self.gateway.exposure = ExposureSnapshot(0, 1, 0.0, 0.01)
         engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
         result = engine.submit(intent())
         self.assertEqual(result["reason"], "EXISTING_XAU_EXPOSURE_BLOCK")
@@ -133,6 +162,22 @@ class RuntimeTests(unittest.TestCase):
         result = engine.submit(intent())
         self.assertEqual(result["state"], "ACKNOWLEDGED")
         self.assertEqual(self.gateway.send_calls, 1)
+        self.assertTrue(result["post_send"]["ok"])
+
+    def test_post_send_exposure_count_violation_forces_manual_review(self):
+        self.gateway.post_send_exposure = ExposureSnapshot(2, 0, 0.02, 0.0)
+        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
+        result = engine.submit(intent())
+        self.assertEqual(self.gateway.send_calls, 1)
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "POST_SEND_EXPOSURE_COUNT_MISMATCH")
+
+    def test_post_send_volume_violation_forces_manual_review(self):
+        self.gateway.post_send_exposure = ExposureSnapshot(1, 0, 0.03, 0.0)
+        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
+        result = engine.submit(intent())
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "POST_SEND_MAX_EXPOSURE_BREACH")
 
     def test_restart_never_resubmits_ambiguous_send(self):
         payload = intent("crash").canonical_payload()
@@ -144,6 +189,19 @@ class RuntimeTests(unittest.TestCase):
         recovered = engine.recover_inflight()
         self.assertEqual(recovered[0]["state"], "MANUAL_REVIEW_NO_RESUBMIT")
         self.assertEqual(self.gateway.send_calls, 0)
+
+    def test_restart_reconciles_existing_broker_position_without_resend(self):
+        payload = intent("recover").canonical_payload()
+        self.store.reserve_intent("recover", payload)
+        self.store.transition("recover", "PREFLIGHT_OK")
+        self.store.transition("recover", "SUBMITTING")
+        self.gateway.post_send_exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
+        # Simulate an already-existing broker position without calling order_send now.
+        self.gateway.send_calls = 1
+        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
+        recovered = engine.recover_inflight()
+        self.assertEqual(recovered[0]["state"], "ACKNOWLEDGED")
+        self.assertEqual(self.gateway.send_calls, 1)
 
     def test_audit_chain_verifies(self):
         self.store.append_event("A", {"x": 1})
