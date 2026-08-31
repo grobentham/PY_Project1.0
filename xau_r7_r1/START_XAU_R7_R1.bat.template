@@ -23,18 +23,17 @@ echo XAU V16 R7-R1 - FULL RUNTIME REPAIR
 echo Frozen R6 package/state integrity is checked before MT5 use.
 echo LIVE ACCOUNT EXECUTION IS PROHIBITED.
 echo Raw/manual intents have NO order-send authority.
-echo Automatic R6 decisions require the two-part DEMO unlock.
+echo Autonomous decision execution is HARD-LOCKED in R7-R1
+echo until the exact causal frozen-R6 producer is implemented/audited.
 echo ============================================================
 echo.
 echo [1] Offline package + persistent-state integrity status
 echo [2] MT5 account / quote / exposure status
 echo [3] Crash-recovery reconciliation - NEVER AUTO-RESENDS
 echo [4] Diagnostic raw-intent preflight - NO SEND
-echo [5] Open frozen-R6 decision inbox folder
-echo [6] Process one admitted R6 decision from inbox
-echo [7] Drain current admitted R6 decision inbox
-echo [8] Run automatic admitted R6 inbox loop
-echo [9] Clear manual-review pause after MT5 review
+echo [5] Open frozen-R6 decision inbox folder - STAGING ONLY
+echo [6] Show producer/execution readiness status
+echo [7] Clear manual-review pause after MT5 review
 echo [0] Exit
 echo.
 set /p CHOICE=Select: 
@@ -59,30 +58,16 @@ if "%CHOICE%"=="4" (
 )
 if "%CHOICE%"=="5" (
     if not exist "r7_r6_bridge\inbox" mkdir "r7_r6_bridge\inbox"
+    echo STAGING ONLY: R7-R1 will not execute inbox decisions because the
+    echo exact causal R6 producer is not yet admitted.
     start "" explorer.exe "%CD%\r7_r6_bridge\inbox"
-    goto MENU
+    goto PAUSEMENU
 )
 if "%CHOICE%"=="6" (
-    echo.
-    echo This consumes ONLY a validated FROZEN_V16_R6 admitted-decision JSON.
-    echo DEMO sending remains locked unless BOTH explicit unlocks are present.
-    set /p DECISION=Decision filename already inside r7_r6_bridge\inbox: 
-    %PY% -m r7_runtime.runtime --process-r6-decision "r7_r6_bridge\inbox\%DECISION%"
+    %PY% -m r7_runtime.runtime --offline-status
     goto PAUSEMENU
 )
 if "%CHOICE%"=="7" (
-    echo DEMO sending remains locked unless BOTH explicit unlocks are present.
-    %PY% -m r7_runtime.runtime --drain-r6-inbox
-    goto PAUSEMENU
-)
-if "%CHOICE%"=="8" (
-    echo.
-    echo Automatic inbox execution is DEMO-ONLY and stops on any manual-review state.
-    echo Press Ctrl+C to stop the loop.
-    %PY% -m r7_runtime.runtime --run-r6-inbox
-    goto PAUSEMENU
-)
-if "%CHOICE%"=="9" (
     echo.
     echo Resume is refused if MT5 still shows ANY XAU exposure or unresolved in-flight intent.
     echo Exact acknowledgement required:
