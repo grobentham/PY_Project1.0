@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict
-from typing import Dict, List, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Dict
 
 from .constants import (
     COMMENT_PREFIX,
+    COMMISSION_RT_SGD_PER_001_LOT,
     DEMO_ONLY,
     HARD_MAX_SPREAD_USD,
     HARD_MAX_TICK_AGE_SECONDS,
@@ -95,7 +96,7 @@ class MT5Gateway:
         if bid <= 0 or ask <= 0 or ask < bid:
             raise GatewayError("INVALID_MARKET_QUOTE")
         if ask - bid > self.max_spread_usd:
-            raise GatewayError(f"SPREAD_GUARD:{ask- bid:.5f}")
+            raise GatewayError(f"SPREAD_GUARD:{ask - bid:.5f}")
         return SymbolSnapshot(
             symbol=SYMBOL,
             bid=bid,
@@ -165,7 +166,11 @@ class MT5Gateway:
         pnl = float(pnl)
         if not math.isfinite(pnl) or pnl >= 0:
             raise GatewayError(f"INVALID_PROJECTED_STOP_PNL:{pnl}")
-        return -pnl
+        commission = COMMISSION_RT_SGD_PER_001_LOT * (float(intent.lot) / 0.01)
+        projected = (-pnl) + commission
+        if not math.isfinite(projected) or projected <= 0:
+            raise GatewayError(f"INVALID_PROJECTED_STOP_WITH_COMMISSION:{projected}")
+        return projected
 
     def build_market_request(self, intent: OrderIntent, entry_price: float) -> Dict:
         mt5 = self._require()
@@ -218,8 +223,9 @@ class MT5Gateway:
             if int(o.magic) == MAGIC and str(getattr(o, "comment", "")) == needle:
                 return BrokerMatch(True, "ORDER", int(o.ticket), "PENDING")
         # History is checked as well so a fast fill/close cannot look like a lost submission.
-        now = time.time()
-        deals = mt5.history_deals_get(now - 7 * 86400, now) or []
+        to_dt = datetime.now(timezone.utc)
+        from_dt = to_dt - timedelta(days=7)
+        deals = mt5.history_deals_get(from_dt, to_dt) or []
         for d in deals:
             if int(getattr(d, "magic", 0)) == MAGIC and str(getattr(d, "comment", "")) == needle:
                 return BrokerMatch(True, "DEAL", int(d.ticket), "HISTORICAL")
