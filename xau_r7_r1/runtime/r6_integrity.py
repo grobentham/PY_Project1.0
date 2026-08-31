@@ -12,6 +12,16 @@ class IntegrityError(RuntimeError):
     pass
 
 
+REQUIRED_R7_OPERATOR_FILES = frozenset({
+    "PROBE_CANONICAL_R6_SOURCE.ps1",
+    "EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1",
+    "SEAL_R6_PRODUCER_CANDIDATE.ps1",
+    "PRECHECK_R6_FUSED_RELEASE.ps1",
+    "R7_R1_PACKAGE_README.md",
+    "R7_R1_REPAIR_AUDIT.md",
+})
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -129,10 +139,23 @@ def verify_runtime_package_integrity(root: Path, manifest_path: Optional[Path] =
         raise IntegrityError("R7_RUNTIME_CODE_HASHES_MISSING")
     _verify_hash_map(root, r7_hashes, "R7_RUNTIME_CODE_HASH_MISMATCH")
 
+    operator_hashes = data.get("r7_operator_tool_sha256")
+    if not isinstance(operator_hashes, dict) or not operator_hashes:
+        raise IntegrityError("R7_OPERATOR_TOOL_HASHES_MISSING")
+    normalized_operator_paths = {str(path).replace("\\", "/") for path in operator_hashes}
+    if normalized_operator_paths != REQUIRED_R7_OPERATOR_FILES:
+        missing = sorted(REQUIRED_R7_OPERATOR_FILES - normalized_operator_paths)
+        extra = sorted(normalized_operator_paths - REQUIRED_R7_OPERATOR_FILES)
+        raise IntegrityError(
+            "R7_OPERATOR_TOOL_PATH_SET_MISMATCH:missing=" + ",".join(missing) + ";extra=" + ",".join(extra)
+        )
+    _verify_hash_map(root, operator_hashes, "R7_OPERATOR_TOOL_HASH_MISMATCH")
+
     return {
         "parent_tree_files": len(data.get("parent_tree_sha256", {})),
         "protected_r6_files": len(protected),
         "r7_runtime_code_files": len(r7_hashes),
+        "r7_operator_tool_files": len(operator_hashes),
         "canonical_parent_sha256": CANONICAL_R6_ZIP_SHA256,
         "causal_r6_producer_ready": False,
         "execution_runtime_hard_locked": True,
