@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-import math
 import unittest
 
 from r7_runtime.constants import CANONICAL_R6_ZIP_SHA256
 from r7_runtime.models import SymbolSnapshot
 from r7_runtime.r6_decision_adapter import DecisionAdapterError, R6DecisionAdapter
-
 
 NOW = 1_800_000_000_000
 
@@ -120,6 +118,11 @@ class AdapterTests(unittest.TestCase):
             self.a.parse(raw(decision(emitted_at_ms=NOW - 301000, signal_bar_ms=NOW - 302000)), now_ms=NOW)
         with self.assertRaisesRegex(DecisionAdapterError, "FUTURE"):
             self.a.parse(raw(decision(emitted_at_ms=NOW + 3000, signal_bar_ms=NOW + 2000)), now_ms=NOW)
+
+    def test_old_signal_cannot_be_revived_by_fresh_emission_timestamp(self):
+        d = decision(signal_bar_ms=NOW - 301000, emitted_at_ms=NOW - 500)
+        with self.assertRaisesRegex(DecisionAdapterError, "SIGNAL_STALE"):
+            self.a.parse(raw(d), now_ms=NOW)
 
     def test_same_decision_is_idempotent_across_market_quotes(self):
         a = self.a.adapt(raw(decision()), symbol(3000.1, 3000.2), now_ms=NOW).intent
