@@ -5,10 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
-from .constants import (
-    CANONICAL_R6_ZIP_SHA256,
-    PROTECTED_R6_PATH_SUFFIXES,
-)
+from .constants import CANONICAL_R6_ZIP_SHA256, PROTECTED_R6_PATH_SUFFIXES
 
 
 class IntegrityError(RuntimeError):
@@ -58,7 +55,6 @@ def verify_runtime_parent_integrity(root: Path, manifest_path: Optional[Path] = 
     expected = data.get("protected_r6_hashes")
     if not isinstance(expected, dict) or not expected:
         raise IntegrityError("PARENT_INTEGRITY_MANIFEST_INVALID")
-
     actual = collect_protected_hashes(root)
     if set(actual) != set(expected):
         raise IntegrityError("PROTECTED_R6_PATH_SET_CHANGED")
@@ -75,7 +71,6 @@ def verify_parent_tree_unchanged(root: Path, tree_manifest: Path, allowed_change
     if not isinstance(expected, dict) or not expected:
         raise IntegrityError("PARENT_TREE_MANIFEST_INVALID")
     allowed = {x.replace("\\", "/") for x in allowed_changed}
-
     failures = []
     for rel, digest in expected.items():
         rel_norm = str(rel).replace("\\", "/")
@@ -116,6 +111,8 @@ def verify_runtime_package_integrity(root: Path, manifest_path: Optional[Path] =
         raise IntegrityError("DEMO_ONLY_MANIFEST_GUARD_MISSING")
     if data.get("execution_enabled_by_default") is not False:
         raise IntegrityError("EXECUTION_DEFAULT_MANIFEST_GUARD_MISSING")
+    if data.get("causal_r6_producer_ready") is not False:
+        raise IntegrityError("CAUSAL_R6_PRODUCER_LOCK_MANIFEST_GUARD_MISSING")
 
     verify_parent_tree_unchanged(root, manifest_path)
     protected = verify_runtime_parent_integrity(root, manifest_path)
@@ -137,4 +134,6 @@ def verify_runtime_package_integrity(root: Path, manifest_path: Optional[Path] =
         "protected_r6_files": len(protected),
         "r7_runtime_code_files": len(r7_hashes),
         "canonical_parent_sha256": CANONICAL_R6_ZIP_SHA256,
+        "causal_r6_producer_ready": False,
+        "execution_runtime_hard_locked": True,
     }
