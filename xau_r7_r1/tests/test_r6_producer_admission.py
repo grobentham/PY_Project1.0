@@ -20,6 +20,7 @@ from r7_runtime.r6_producer_admission import (
     verify_producer_admission,
 )
 from r7_runtime.r6_producer_parity import ISOLATION_SCHEMA, build_parity_report
+from r7_runtime.r6_source_bundle import BUNDLE_VERSION
 from r7_runtime.r6_source_probe import probe_frozen_r6_source
 
 
@@ -67,17 +68,46 @@ class ProducerAdmissionTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
 
-        protected = {relative: sha256_file(root / relative) for relative in sources}
+        source_hashes = {relative: sha256_file(root / relative) for relative in sources}
         parent = {
             "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
             "build_verified_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
-            "protected_r6_hashes": protected,
+            "protected_r6_hashes": dict(source_hashes),
+            "parent_tree_sha256": dict(source_hashes),
         }
         parent_path = root / "R7_R1_PARENT_INTEGRITY.json"
         parent_path.write_text(json.dumps(parent), encoding="utf-8")
 
         probe_path = root / "R7_R1_R6_SOURCE_PROBE.json"
         probe_path.write_text(json.dumps(probe_frozen_r6_source(root), sort_keys=True), encoding="utf-8")
+
+        bundle_path = root / "R7_R1_R6_SOURCE_BUNDLE_MANIFEST.json"
+        bundle_path.write_text(json.dumps({
+            "bundle_version": BUNDLE_VERSION,
+            "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
+            "source_only_bundle": True,
+            "static_local_python_dependency_closure_extracted": True,
+            "required_local_imports_resolved": True,
+            "dynamic_imports_allowed": False,
+            "dependency_count": len(sources),
+            "required_source_files": list(sources),
+            "dependency_closure_files": list(sources),
+            "unresolved_nonarchive_imports": {},
+            "strategy_executed": False,
+            "strategy_retuned": False,
+            "final_holdout_accessed": False,
+            "producer_admitted": False,
+            "files": {
+                relative: {
+                    "sha256": source_hashes[relative],
+                    "size_bytes": (root / relative).stat().st_size,
+                    "required_entry_source": True,
+                }
+                for relative in sources
+            },
+            "source_probe_file": probe_path.name,
+            "source_probe_sha256": sha256_file(probe_path),
+        }, sort_keys=True), encoding="utf-8")
 
         producer_module = root / "r7_runtime" / "r6_causal_producer.py"
         producer_module.parent.mkdir(parents=True, exist_ok=True)
@@ -114,6 +144,7 @@ class ProducerAdmissionTests(unittest.TestCase):
             producer_stream_path,
             isolation_path=isolation_path,
             source_probe_path=probe_path,
+            source_bundle_manifest_path=bundle_path,
             producer_module_path=producer_module,
             producer_module_relative="r7_runtime/r6_causal_producer.py",
         )
@@ -122,6 +153,7 @@ class ProducerAdmissionTests(unittest.TestCase):
         return {
             "parent": parent_path,
             "probe": probe_path,
+            "bundle": bundle_path,
             "producer_module": producer_module,
             "reference": reference_path,
             "producer_stream": producer_stream_path,
@@ -137,13 +169,56 @@ class ProducerAdmissionTests(unittest.TestCase):
             self.assertTrue(result["ready"])
             self.assertTrue(result["parity"]["parity_pass"])
             self.assertEqual(set(result["parity"]["frozen_sources_covered"]), set(REQUIRED_FROZEN_SOURCES))
+            self.assertEqual(result["source_bundle"]["dependency_count"], 3)
 
     def test_source_bytes_changed_after_probe_fail_closed(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             self.build_fixture(root)
             (root / "v16r5" / "engine.py").write_text("tampered = True\n", encoding="utf-8")
-            with self.assertRaisesRegex(ProducerAdmissionError, "SOURCE_FILE_HASH_MISMATCH"):
+            with self.assertRaisesRegex(ProducerAdmissionError, "SOURCE_BUNDLE_FILE_SIZE_MISMATCH|SOURCE_BUNDLE_FILE_HASH_MISMATCH"):
+                verify_producer_admission(root)
+
+    def test_bundle_helper_hash_must_match_canonical_parent_tree(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paths = self.build_fixture(root)
+            bundle = json.loads(paths["bundle"].read_text(encoding="utf-8"))
+            bundle["files"]["v16r5/engine.py"]["sha256"] = "0" * 64
+            paths["bundle"].write_text(json.dumps(bundle), encoding="utf-8")
+            parity = json.loads(paths["parity"].read_text(encoding="utf-8"))
+            parity["source_bundle_manifest_sha256"] = sha256_file(paths["bundle"])
+            paths["parity"].write_text(json.dumps(parity), encoding="utf-8")
+            with self.assertRaisesRegex(ProducerAdmissionError, "SOURCE_BUNDLE_FILE_HASH_MISMATCH|SOURCE_BUNDLE_NOT_CANONICAL_PARENT_BYTES"):
+                verify_producer_admission(root)
+
+    def test_bundle_manifest_tamper_invalidates_parity_binding(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paths = self.build_fixture(root)
+            bundle = json.loads(paths["bundle"].read_text(encoding="utf-8"))
+            bundle["unresolved_nonarchive_imports"] = {"v16r5/engine.py": ["import pandas"]}
+            paths["bundle"].write_text(json.dumps(bundle), encoding="utf-8")
+            with self.assertRaisesRegex(ProducerAdmissionError, "PRODUCER_PARITY_SOURCE_BUNDLE_HASH_MISMATCH"):
+                verify_producer_admission(root)
+
+    def test_prohibited_holdout_path_in_bundle_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paths = self.build_fixture(root)
+            extra = root / "final_holdout_helper.py"
+            extra.write_text("VALUE=1\n", encoding="utf-8")
+            parent = json.loads(paths["parent"].read_text(encoding="utf-8"))
+            parent["parent_tree_sha256"]["final_holdout_helper.py"] = sha256_file(extra)
+            paths["parent"].write_text(json.dumps(parent), encoding="utf-8")
+            bundle = json.loads(paths["bundle"].read_text(encoding="utf-8"))
+            bundle["dependency_count"] += 1
+            bundle["dependency_closure_files"].append("final_holdout_helper.py")
+            bundle["files"]["final_holdout_helper.py"] = {
+                "sha256": sha256_file(extra), "size_bytes": extra.stat().st_size, "required_entry_source": False
+            }
+            paths["bundle"].write_text(json.dumps(bundle), encoding="utf-8")
+            with self.assertRaisesRegex(ProducerAdmissionError, "SOURCE_BUNDLE_PROHIBITED_PATH"):
                 verify_producer_admission(root)
 
     def test_any_parity_mismatch_claim_fail_closed(self):
