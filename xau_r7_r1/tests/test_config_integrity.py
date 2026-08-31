@@ -8,7 +8,12 @@ from pathlib import Path
 from unittest import mock
 
 from r7_runtime.constants import CANONICAL_R6_ZIP_SHA256
-from r7_runtime.r6_integrity import IntegrityError, sha256_file, verify_runtime_package_integrity
+from r7_runtime.r6_integrity import (
+    REQUIRED_R7_OPERATOR_FILES,
+    IntegrityError,
+    sha256_file,
+    verify_runtime_package_integrity,
+)
 from r7_runtime import runtime
 
 
@@ -113,12 +118,18 @@ class PackageIntegrityTests(unittest.TestCase):
             "r7_runtime/runtime.py": sha256_file(code),
             "START_XAU.bat": sha256_file(root / "START_XAU.bat"),
         }
+        operator_hashes = {}
+        for rel in sorted(REQUIRED_R7_OPERATOR_FILES):
+            p = root / rel
+            p.write_text("R7_OPERATOR:" + rel, encoding="utf-8")
+            operator_hashes[rel] = sha256_file(p)
         manifest = {
             "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
             "build_verified_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
             "parent_tree_sha256": parent_hashes,
             "protected_r6_hashes": protected,
             "r7_runtime_code_sha256": r7_hashes,
+            "r7_operator_tool_sha256": operator_hashes,
             "original_start_xau_sha256": original_launcher_hash,
             "final_holdout_accessed": False,
             "strategy_retuned": False,
@@ -135,6 +146,7 @@ class PackageIntegrityTests(unittest.TestCase):
             result = verify_runtime_package_integrity(root)
             self.assertEqual(result["protected_r6_files"], 5)
             self.assertEqual(result["r7_runtime_code_files"], 2)
+            self.assertEqual(result["r7_operator_tool_files"], len(REQUIRED_R7_OPERATOR_FILES))
 
     def test_causal_producer_manifest_guard_missing_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -172,6 +184,26 @@ class PackageIntegrityTests(unittest.TestCase):
             self.build_fake_package(root)
             (root / "r7_runtime" / "runtime.py").write_text("tampered", encoding="utf-8")
             with self.assertRaises(IntegrityError):
+                verify_runtime_package_integrity(root)
+
+    def test_operator_tool_tamper_is_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            target = root / "PRECHECK_R6_FUSED_RELEASE.ps1"
+            target.write_text("tampered", encoding="utf-8")
+            with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_TOOL_HASH_MISMATCH"):
+                verify_runtime_package_integrity(root)
+
+    def test_operator_tool_path_omission_is_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            manifest_path = root / "R7_R1_PARENT_INTEGRITY.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["r7_operator_tool_sha256"].pop("R7_R1_REPAIR_AUDIT.md")
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_TOOL_PATH_SET_MISMATCH"):
                 verify_runtime_package_integrity(root)
 
     def test_frozen_original_launcher_tamper_is_detected(self):
