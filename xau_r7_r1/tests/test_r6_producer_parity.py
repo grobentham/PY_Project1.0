@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 import unittest
@@ -158,7 +157,9 @@ class ProducerParityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             reference, producer, isolation, probe, module = self.build_files(root)
-            producer.write_text(producer.read_text(encoding="utf-8") + "{}\n", encoding="utf-8")
+            rows = [json.loads(x) for x in producer.read_text(encoding="utf-8").splitlines()]
+            rows[0]["decision"]["emitted_at_ms"] += 1
+            producer.write_text("\n".join(json.dumps(x, sort_keys=True) for x in rows) + "\n", encoding="utf-8")
             with self.assertRaisesRegex(ProducerParityError, "PARITY_ISOLATION_PRODUCER_HASH_MISMATCH"):
                 build_parity_report(
                     reference, producer, isolation_path=isolation, source_probe_path=probe,
