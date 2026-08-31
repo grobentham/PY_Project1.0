@@ -24,6 +24,7 @@ from .models import OrderIntent
 from .mt5_gateway import MT5Gateway
 from .r6_bridge import R6InboxProcessor
 from .r6_integrity import verify_runtime_package_integrity
+from .r6_producer_admission import producer_admission_status
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = ROOT / "r7_runtime_state"
@@ -75,9 +76,16 @@ def load_config() -> Dict[str, Any]:
     return cfg
 
 
+def producer_execution_admitted() -> bool:
+    """Require both the constitutional readiness switch and exact admission evidence."""
+    if not CAUSAL_R6_PRODUCER_READY:
+        return False
+    return bool(producer_admission_status(ROOT).get("ready", False))
+
+
 def demo_execution_enabled(cfg: Dict[str, Any]) -> bool:
     return (
-        bool(CAUSAL_R6_PRODUCER_READY)
+        producer_execution_admitted()
         and bool(cfg["request_demo_execution"])
         and os.environ.get(EXECUTION_UNLOCK_ENV) == EXECUTION_UNLOCK_VALUE
     )
@@ -122,13 +130,16 @@ def _bridge_paused(store: AuditStore) -> bool:
 
 
 def offline_status(store: AuditStore, package_integrity: Dict[str, Any], store_integrity: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    admission = producer_admission_status(ROOT)
     return {
         "version": VERSION,
         "package_integrity": "PASS",
         "integrity": package_integrity,
         "state_integrity": store_integrity,
         "demo_execution_requested": cfg["request_demo_execution"],
-        "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY),
+        "producer_readiness_switch": bool(CAUSAL_R6_PRODUCER_READY),
+        "producer_admission": admission,
+        "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY) and bool(admission.get("ready", False)),
         "execution_unlocked": demo_execution_enabled(cfg),
         "raw_intent_send_authority": False,
         "diagnostic_preflight_uses_operational_ledger": False,
@@ -139,13 +150,16 @@ def offline_status(store: AuditStore, package_integrity: Dict[str, Any], store_i
 
 
 def connected_status(store: AuditStore, gateway: MT5Gateway, cfg: Dict[str, Any], package_integrity: Dict[str, Any], store_integrity: Dict[str, Any]) -> Dict[str, Any]:
+    admission = producer_admission_status(ROOT)
     return {
         "version": VERSION,
         "package_integrity": "PASS",
         "integrity": package_integrity,
         "state_integrity": store_integrity,
         "demo_execution_requested": cfg["request_demo_execution"],
-        "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY),
+        "producer_readiness_switch": bool(CAUSAL_R6_PRODUCER_READY),
+        "producer_admission": admission,
+        "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY) and bool(admission.get("ready", False)),
         "execution_unlocked": demo_execution_enabled(cfg),
         "raw_intent_send_authority": False,
         "diagnostic_preflight_uses_operational_ledger": False,
@@ -203,10 +217,10 @@ def main() -> None:
                 print(json.dumps(bridge.clear_pause(args.resume_ack), indent=2, sort_keys=True))
                 return
             if args.process_r6_decision or args.drain_r6_inbox or args.run_r6_inbox:
-                if not CAUSAL_R6_PRODUCER_READY:
-                    raise RuntimeError("CAUSAL_R6_PRODUCER_NOT_ADMITTED: automatic decision execution remains hard-locked")
+                if not producer_execution_admitted():
+                    raise RuntimeError("CAUSAL_R6_PRODUCER_NOT_ADMITTED: exact source/parity admission is required before automatic decision execution")
                 if not execution_enabled:
-                    raise RuntimeError("R6_INBOX_DEMO_EXECUTION_LOCKED: automatic decision consumption is disabled until both demo unlocks are present")
+                    raise RuntimeError("R6_INBOX_DEMO_EXECUTION_LOCKED: automatic decision consumption requires producer admission plus both demo unlocks")
             if args.process_r6_decision:
                 print(json.dumps(bridge.process_path(args.process_r6_decision), indent=2, sort_keys=True))
                 return
