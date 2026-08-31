@@ -97,10 +97,30 @@ function Find-Python {
 }
 
 function Invoke-Python($Python, [string[]]$Arguments) {
-    & $Python.Exe @($Python.Prefix) @Arguments
+    $allArgs = @()
+    $allArgs += @($Python.Prefix)
+    $allArgs += @($Arguments)
+    & $Python.Exe @allArgs
     if ($LASTEXITCODE -ne 0) {
         Fail ('Python command failed: ' + ($Arguments -join ' '))
     }
+}
+
+function Invoke-PythonCapture($Python, [string[]]$Arguments) {
+    $allArgs = @()
+    $allArgs += @($Python.Prefix)
+    $allArgs += @($Arguments)
+    $output = & $Python.Exe @allArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail ('Python command failed: ' + ($Arguments -join ' ') + "`n" + ($output -join "`n"))
+    }
+    return @($output)
+}
+
+function Assert-PythonVersion($Python) {
+    $out = Invoke-PythonCapture $Python @('-c','import sys; print("%d.%d.%d" % sys.version_info[:3]); raise SystemExit(0 if sys.version_info >= (3,9) else 9)')
+    if ($out.Count -lt 1) { Fail 'unable to determine Python version' }
+    Write-Host ('Python: ' + [string]$out[-1])
 }
 
 if (!(Test-Path -LiteralPath $ParentZip -PathType Leaf)) {
@@ -113,6 +133,7 @@ if ($parentHash -ne $CanonicalSha256) {
 }
 
 $Python = Find-Python
+Assert-PythonVersion $Python
 New-Item -ItemType Directory -Path $Extract -Force | Out-Null
 New-Item -ItemType Directory -Path $Verify -Force | Out-Null
 
@@ -158,7 +179,6 @@ try {
 
     Copy-Item -LiteralPath (Join-Path $Here 'START_XAU_R7_R1.bat.template') -Destination (Join-Path $Extract 'START_XAU.bat') -Force
 
-    # Verify every inherited parent file is still byte-identical except the intentionally replaced launcher.
     Verify-InheritedTree $Extract $parentTree
     $protectedAfter = Get-ProtectedHashes $Extract
     foreach ($entry in (Get-MapEntries $protected)) {
@@ -175,8 +195,7 @@ try {
     try {
         Invoke-Python $Python @('-m','compileall','-q','r7_runtime','r7_runtime_tests')
         Invoke-Python $Python @('-m','unittest','discover','-s','r7_runtime_tests','-v')
-        $offline = & $Python.Exe @($Python.Prefix) -m r7_runtime.runtime --offline-status 2>&1
-        if ($LASTEXITCODE -ne 0) { Fail 'offline runtime integrity status failed before packaging' }
+        $offline = Invoke-PythonCapture $Python @('-m','r7_runtime.runtime','--offline-status')
     }
     finally {
         Pop-Location
@@ -198,7 +217,6 @@ try {
     }
     Write-Utf8NoBom (Join-Path $Extract 'R7_R1_BUILD_VERIFICATION.json') ($verification | ConvertTo-Json -Depth 8)
 
-    # Remove only transient state created by offline verification.
     Get-ChildItem -LiteralPath (Join-Path $Extract 'runtime') -ErrorAction SilentlyContinue | Where-Object {
         $_.Name -like 'r7_r1_state.sqlite3*' -or $_.Name -eq 'r7_r1_runtime.lock'
     } | Remove-Item -Force -ErrorAction SilentlyContinue
@@ -209,7 +227,6 @@ try {
     if (Test-Path -LiteralPath $OutputSha) { Remove-Item -LiteralPath $OutputSha -Force }
     Compress-Archive -Path (Join-Path $Extract '*') -DestinationPath $OutputZip -CompressionLevel Optimal
 
-    # Clean extraction verification of the exact ZIP being delivered.
     Expand-Archive -LiteralPath $OutputZip -DestinationPath $Verify -Force
     $verifyManifest = Get-Content -LiteralPath (Join-Path $Verify 'R7_R1_PARENT_INTEGRITY.json') -Raw | ConvertFrom-Json
     Verify-InheritedTree $Verify $verifyManifest.parent_tree_sha256
