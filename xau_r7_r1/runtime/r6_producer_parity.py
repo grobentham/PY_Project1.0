@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from .constants import (
     CANONICAL_R6_ZIP_SHA256,
@@ -22,7 +21,7 @@ class ProducerParityError(RuntimeError):
     pass
 
 
-PARITY_TOOL_VERSION = "R7_R1_R6_PRODUCER_PARITY_TOOL_V1"
+PARITY_TOOL_VERSION = "R7_R1_R6_PRODUCER_PARITY_TOOL_V2"
 ISOLATION_SCHEMA = "V16_R6_CAUSAL_FIXTURE_ISOLATION_V1"
 
 _RECORD_FIELDS = {"fixture_id", "available_through_ms", "decision"}
@@ -192,15 +191,19 @@ def build_parity_report(
     *,
     isolation_path: Path,
     source_probe_path: Path,
+    source_bundle_manifest_path: Path,
     producer_module_path: Path,
     producer_module_relative: str,
 ) -> Dict[str, Any]:
     reference_path = Path(reference_path).resolve()
     producer_stream_path = Path(producer_stream_path).resolve()
     source_probe_path = Path(source_probe_path).resolve()
+    source_bundle_manifest_path = Path(source_bundle_manifest_path).resolve()
     producer_module_path = Path(producer_module_path).resolve()
     if not source_probe_path.is_file():
         raise ProducerParityError("SOURCE_PROBE_MISSING")
+    if not source_bundle_manifest_path.is_file():
+        raise ProducerParityError("SOURCE_BUNDLE_MANIFEST_MISSING")
     if not producer_module_path.is_file():
         raise ProducerParityError("PRODUCER_MODULE_MISSING")
 
@@ -287,6 +290,7 @@ def build_parity_report(
         "parity_tool_version": PARITY_TOOL_VERSION,
         "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
         "source_probe_sha256": sha256_file(source_probe_path),
+        "source_bundle_manifest_sha256": sha256_file(source_bundle_manifest_path),
         "producer_module": producer_module_relative.replace("\\", "/"),
         "producer_module_sha256": sha256_file(producer_module_path),
         "reference_stream_sha256": sha256_file(reference_path),
@@ -319,6 +323,7 @@ def main() -> None:
     parser.add_argument("--producer-stream", type=Path, required=True)
     parser.add_argument("--isolation", type=Path, required=True)
     parser.add_argument("--source-probe", type=Path, required=True)
+    parser.add_argument("--source-bundle-manifest", type=Path, required=True)
     parser.add_argument("--producer-module", type=Path, required=True)
     parser.add_argument("--producer-relative", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -328,6 +333,7 @@ def main() -> None:
         args.producer_stream,
         isolation_path=args.isolation,
         source_probe_path=args.source_probe,
+        source_bundle_manifest_path=args.source_bundle_manifest,
         producer_module_path=args.producer_module,
         producer_module_relative=args.producer_relative,
     )
