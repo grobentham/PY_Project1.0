@@ -12,8 +12,9 @@ from .constants import (
     CANONICAL_R6_ZIP_SHA256, MAX_CANONICAL_LOT, RETIRED_SOURCE,
     R6_COMPRESSION_GEOMETRY, R6_DECISION_ID_MAX_LENGTH,
     R6_DECISION_MAX_AGE_SECONDS, R6_DECISION_MAX_FUTURE_SECONDS,
-    R6_DECISION_POLICY, R6_DECISION_SCHEMA, R6_INTENT_ID_HASH_HEX,
-    R6_LTM_GEOMETRY, R6_SOURCE_FAMILY, R6_SOURCE_PRIORITY,
+    R6_DECISION_POLICY, R6_DECISION_SCHEMA, R6_EXECUTION_AUTHORITY,
+    R6_INTENT_ID_HASH_HEX, R6_LTM_GEOMETRY, R6_SOURCE_FAMILY,
+    R6_SOURCE_PRIORITY,
 )
 from .models import OrderIntent, SymbolSnapshot
 
@@ -249,6 +250,6 @@ class R6DecisionAdapter:
             lot=decision.lot_size, stop_price=stop, take_profit_price=target,
             source=decision.source, frozen_atr_usd=decision.atr_usd,
             frozen_stop_atr=decision.stop_atr, frozen_target_atr=decision.target_atr,
-            decision_fingerprint=fingerprint,
+            decision_fingerprint=fingerprint, execution_authority=R6_EXECUTION_AUTHORITY,
         )
         return AdaptedDecision(decision, intent, raw_sha256, fingerprint, entry)
