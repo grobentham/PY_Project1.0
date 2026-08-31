@@ -94,13 +94,16 @@ class SourceBundleTests(unittest.TestCase):
                 "V16_R5_MAIN.py",
             }
             self.assertTrue(result["source_only_bundle"])
-            self.assertTrue(result["static_local_python_dependency_closure"])
+            self.assertTrue(result["static_local_python_dependency_closure_extracted"])
+            self.assertTrue(result["required_local_imports_resolved"])
             self.assertFalse(result["dynamic_imports_allowed"])
             self.assertEqual(set(result["files"]), expected)
             self.assertEqual(result["dependency_count"], len(expected))
             self.assertFalse(result["strategy_executed"])
             self.assertFalse(result["final_holdout_accessed"])
             self.assertFalse(result["producer_admitted"])
+            self.assertIn("v16r5/engine.py", result["unresolved_nonarchive_imports"])
+            self.assertIn("import pandas", result["unresolved_nonarchive_imports"]["v16r5/engine.py"])
             for relative in expected:
                 self.assertTrue((out / relative).is_file(), relative)
             self.assertFalse((out / "research_consumed_validation").exists())
@@ -111,7 +114,7 @@ class SourceBundleTests(unittest.TestCase):
             self.assertEqual(set(manifest["dependency_closure_files"]), expected)
             self.assertEqual(set(manifest["files"]), expected)
 
-    def test_third_party_import_is_not_falsely_extracted(self):
+    def test_third_party_import_is_recorded_not_falsely_extracted(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             parent = self.make_zip(root)
@@ -119,6 +122,7 @@ class SourceBundleTests(unittest.TestCase):
             result = extract_canonical_source_bundle(parent, out, expected_parent_sha256=self.digest(parent))
             self.assertNotIn("pandas.py", result["files"])
             self.assertFalse((out / "pandas.py").exists())
+            self.assertIn("import pandas", result["unresolved_nonarchive_imports"]["v16r5/engine.py"])
 
     def test_wrong_parent_hash_fails_before_extraction(self):
         with tempfile.TemporaryDirectory() as td:
@@ -136,18 +140,19 @@ class SourceBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(R6SourceBundleError, "R6_ZIP_REQUIRED_SOURCE_MISSING"):
                 extract_canonical_source_bundle(parent, root / "bundle", expected_parent_sha256=self.digest(parent))
 
-    def test_missing_imported_local_helper_fails_as_incomplete_source_not_silently_ignored(self):
+    def test_missing_relative_local_helper_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             parent = self.make_zip(root, missing="v16r5/helpers.py")
-            out = root / "bundle"
-            result = extract_canonical_source_bundle(parent, out, expected_parent_sha256=self.digest(parent))
-            # Static import resolution cannot distinguish an absent local helper from an external module.
-            # The deep source map preserves the import, so producer admission cannot claim this bundle
-            # is complete until dependency review resolves it.
-            r5 = json.loads((out / "R7_R1_R6_SOURCE_PROBE.json").read_text(encoding="utf-8"))["files"]["v16r5/engine.py"]
-            self.assertTrue(any(".helpers" in item or "helpers" in item for item in r5["imports"]))
-            self.assertNotIn("v16r5/helpers.py", result["files"])
+            with self.assertRaisesRegex(R6SourceBundleError, "R6_SOURCE_REQUIRED_LOCAL_IMPORT_MISSING"):
+                extract_canonical_source_bundle(parent, root / "bundle", expected_parent_sha256=self.digest(parent))
+
+    def test_missing_absolute_module_under_local_package_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            parent = self.make_zip(root, missing="v16r5/selector.py")
+            with self.assertRaisesRegex(R6SourceBundleError, "R6_SOURCE_REQUIRED_LOCAL_IMPORT_MISSING"):
+                extract_canonical_source_bundle(parent, root / "bundle", expected_parent_sha256=self.digest(parent))
 
     def test_duplicate_archive_member_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
