@@ -3,6 +3,7 @@ Set-StrictMode -Version Latest
 
 $CanonicalName = 'XAU_BOUNDED_RECOVERY_V16_PROFIT_TRANSFER_R6_RESEARCH_FROZEN.zip'
 $CanonicalSha256 = '8b54c6bc53c38c34b8e88d39893687e8ba75b063897c8b097aaedc68d614fca7'
+$RequiredProbeVersion = 'R7_R1_R6_SOURCE_PROBE_V2'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ParentZip = Join-Path $Here $CanonicalName
 $Output = Join-Path $Here 'R7_R1_R6_SOURCE_PROBE.json'
@@ -59,15 +60,17 @@ try {
     $Generated = Join-Path $Extract 'R7_R1_R6_SOURCE_PROBE.json'
     if (!(Test-Path -LiteralPath $Generated -PathType Leaf)) { Fail 'source-probe report was not generated' }
     $report = Get-Content -LiteralPath $Generated -Raw | ConvertFrom-Json
+    if ($report.probe_version -ne $RequiredProbeVersion) { Fail ('stale or unexpected probe version: ' + [string]$report.probe_version) }
     if ($report.canonical_parent_zip_sha256 -ne $CanonicalSha256) { Fail 'probe report canonical hash mismatch' }
     if ($report.source_only_probe -ne $true) { Fail 'probe was not source-only' }
+    if ($report.normalized_ast_source_included -ne $true) { Fail 'probe did not include normalized AST implementation source' }
     if ($report.strategy_executed -ne $false) { Fail 'probe claims strategy execution' }
     if ($report.final_holdout_accessed -ne $false) { Fail 'probe claims Final Holdout access' }
     if ($report.producer_admitted -ne $false) { Fail 'probe may not admit producer by itself' }
     if ($report.required_engine_contract_present -ne $true) { Fail 'frozen engine contract was not confirmed' }
 
     Copy-Item -LiteralPath $Generated -Destination $Output -Force
-    Write-Host '[PASS] Exact frozen R5/R6 source contract probed without strategy execution.' -ForegroundColor Green
+    Write-Host '[PASS] Exact frozen R5/R6 source implementation mapped without strategy execution.' -ForegroundColor Green
     Write-Host ('Report: ' + $Output)
 }
 finally {
