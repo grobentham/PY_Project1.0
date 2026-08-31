@@ -13,6 +13,11 @@ PROJECTED_EQUITY_FLOOR_SGD = 850.0
 MAX_CANONICAL_LOT = 0.02
 MAX_SIMULTANEOUS_SYMBOL_EXPOSURES = 1
 
+# Protected R5 validation records 0.0945 SGD commission at 0.01 lot.
+# Projected stop risk must therefore include the same round-turn commission burden
+# in addition to MT5 OrderCalcProfit stop P/L.
+COMMISSION_RT_SGD_PER_001_LOT = 0.0945
+
 RETIRED_SOURCE = "AUX_RF_LTM"
 MARTINGALE_ENABLED = False
 RECOVERY_ENABLED = False
