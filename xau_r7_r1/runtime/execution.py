@@ -4,8 +4,9 @@ import re
 from dataclasses import asdict
 from typing import Any, Dict, List
 
-from .audit_store import AuditStore, StoreError
-from .models import OrderIntent
+from .audit_store import AuditStore
+from .constants import MAX_CANONICAL_LOT
+from .models import BrokerMatch, OrderIntent
 from .risk import RiskGovernor
 
 
@@ -55,13 +56,56 @@ class ExecutionEngine:
             "request": request,
         }
 
+    def _post_send_exposure_ok(self, match: BrokerMatch) -> Dict[str, Any]:
+        exposure = self.gateway.exposure_snapshot()
+        detail = asdict(exposure)
+        if exposure.total_lot > MAX_CANONICAL_LOT + 1e-12:
+            return {"ok": False, "reason": "POST_SEND_MAX_EXPOSURE_BREACH", "exposure": detail}
+        if match.kind in {"POSITION", "ORDER"}:
+            if exposure.total_count != 1:
+                return {"ok": False, "reason": "POST_SEND_EXPOSURE_COUNT_MISMATCH", "exposure": detail}
+        elif match.kind == "DEAL":
+            # find_intent_at_broker checks current position/order first. A historical
+            # deal match therefore means this intent has no current exposure. Any
+            # remaining XAU exposure is unexpected and must be reviewed manually.
+            if exposure.total_count != 0:
+                return {"ok": False, "reason": "POST_SEND_UNEXPECTED_XAU_EXPOSURE", "exposure": detail}
+        else:
+            return {"ok": False, "reason": "POST_SEND_UNKNOWN_BROKER_MATCH_KIND", "exposure": detail}
+        return {"ok": True, "exposure": detail}
+
+    def _acknowledge_or_manual(self, intent_id: str, match: BrokerMatch, *, base_detail: Dict[str, Any]) -> Dict[str, Any]:
+        post = self._post_send_exposure_ok(match)
+        detail = dict(base_detail)
+        detail.update({"broker_kind": match.kind, "broker_state": match.state, "post_send": post})
+        if not post["ok"]:
+            self.store.transition(
+                intent_id,
+                "MANUAL_REVIEW_NO_RESUBMIT",
+                broker_ticket=match.ticket,
+                error=post["reason"],
+                detail=detail,
+            )
+            return {
+                "ok": False,
+                "state": "MANUAL_REVIEW_NO_RESUBMIT",
+                "reason": post["reason"],
+                "broker_match": asdict(match),
+                "post_send": post,
+            }
+        self.store.transition(intent_id, "ACKNOWLEDGED", broker_ticket=match.ticket, detail=detail)
+        return {"ok": True, "state": "ACKNOWLEDGED", "broker_match": asdict(match), "post_send": post}
+
     def submit(self, intent: OrderIntent) -> Dict[str, Any]:
         self.validate_intent_shape(intent)
         payload = intent.canonical_payload()
         created = self.store.reserve_intent(intent.client_intent_id, payload)
         if not created:
             existing = self.store.get_intent(intent.client_intent_id)
-            self.store.append_event("DUPLICATE_SUBMIT_SUPPRESSED", {"client_intent_id": intent.client_intent_id, "state": existing["state"]})
+            self.store.append_event(
+                "DUPLICATE_SUBMIT_SUPPRESSED",
+                {"client_intent_id": intent.client_intent_id, "state": existing["state"]},
+            )
             return {"ok": False, "duplicate_suppressed": True, "intent": existing}
 
         try:
@@ -121,7 +165,11 @@ class ExecutionEngine:
 
         # Persist SUBMITTING before order_send. If the process dies after this point,
         # restart recovery must reconcile with the broker and must never auto-resubmit.
-        self.store.transition(intent.client_intent_id, "SUBMITTING", detail={"entry_price": second["request"]["price"]})
+        self.store.transition(
+            intent.client_intent_id,
+            "SUBMITTING",
+            detail={"entry_price": second["request"]["price"]},
+        )
         try:
             result = self.gateway.order_send(second["request"])
             ticket = int(getattr(result, "order", 0) or getattr(result, "deal", 0) or 0) or None
@@ -129,14 +177,11 @@ class ExecutionEngine:
         except Exception as exc:
             match = self.gateway.find_intent_at_broker(intent.client_intent_id)
             if match.found:
-                self.store.transition(
+                return self._acknowledge_or_manual(
                     intent.client_intent_id,
-                    "ACKNOWLEDGED",
-                    broker_ticket=match.ticket,
-                    error=str(exc),
-                    detail={"recovered_after_send_exception": True, "broker_kind": match.kind},
+                    match,
+                    base_detail={"recovered_after_send_exception": True, "send_error": str(exc)},
                 )
-                return {"ok": True, "state": "ACKNOWLEDGED", "broker_match": asdict(match)}
             self.store.transition(
                 intent.client_intent_id,
                 "MANUAL_REVIEW_NO_RESUBMIT",
@@ -147,13 +192,11 @@ class ExecutionEngine:
 
         match = self.gateway.find_intent_at_broker(intent.client_intent_id)
         if match.found:
-            self.store.transition(
+            return self._acknowledge_or_manual(
                 intent.client_intent_id,
-                "ACKNOWLEDGED",
-                broker_ticket=match.ticket,
-                detail={"broker_kind": match.kind, "broker_state": match.state},
+                match,
+                base_detail={"order_send_returned_success": True},
             )
-            return {"ok": True, "state": "ACKNOWLEDGED", "broker_match": asdict(match)}
 
         self.store.transition(
             intent.client_intent_id,
@@ -168,19 +211,23 @@ class ExecutionEngine:
             intent_id = row["client_intent_id"]
             state = row["state"]
             if state in {"RESERVED", "PREFLIGHT_OK"}:
-                self.store.transition(intent_id, "ABANDONED_BEFORE_SEND", detail={"restart_recovery": True, "send_was_not_started": True})
+                self.store.transition(
+                    intent_id,
+                    "ABANDONED_BEFORE_SEND",
+                    detail={"restart_recovery": True, "send_was_not_started": True},
+                )
                 results.append({"client_intent_id": intent_id, "state": "ABANDONED_BEFORE_SEND"})
                 continue
             if state in {"SUBMITTING", "SUBMITTED"}:
                 match = self.gateway.find_intent_at_broker(intent_id)
                 if match.found:
-                    self.store.transition(
+                    result = self._acknowledge_or_manual(
                         intent_id,
-                        "ACKNOWLEDGED",
-                        broker_ticket=match.ticket,
-                        detail={"restart_recovery": True, "broker_kind": match.kind, "broker_state": match.state},
+                        match,
+                        base_detail={"restart_recovery": True},
                     )
-                    results.append({"client_intent_id": intent_id, "state": "ACKNOWLEDGED", "broker_match": asdict(match)})
+                    result["client_intent_id"] = intent_id
+                    results.append(result)
                 else:
                     self.store.transition(
                         intent_id,
