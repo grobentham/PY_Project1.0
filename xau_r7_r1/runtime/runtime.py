@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
@@ -103,6 +104,19 @@ def load_intent(path: Path) -> OrderIntent:
     return OrderIntent(raw["client_intent_id"], raw["side"], lot, stop, target, raw["source"])
 
 
+def diagnostic_preflight(gateway, intent: OrderIntent) -> Dict[str, Any]:
+    """Run raw diagnostic preflight without touching the operational intent ledger."""
+    with tempfile.TemporaryDirectory(prefix="xau_r7_r1_diag_") as td:
+        diag_store = AuditStore(Path(td) / "diagnostic.sqlite3")
+        try:
+            result = ExecutionEngine(diag_store, gateway, execution_enabled=False).submit(intent)
+            result["diagnostic_ephemeral_state"] = True
+            result["operational_ledger_touched"] = False
+            return result
+        finally:
+            diag_store.close()
+
+
 def _bridge_paused(store: AuditStore) -> bool:
     return bool(store.get_runtime_state(R6_BRIDGE_PAUSE_STATE_KEY, False)) or (BRIDGE_ROOT / "PAUSED_MANUAL_REVIEW").exists()
 
@@ -117,6 +131,7 @@ def offline_status(store: AuditStore, package_integrity: Dict[str, Any], store_i
         "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY),
         "execution_unlocked": demo_execution_enabled(cfg),
         "raw_intent_send_authority": False,
+        "diagnostic_preflight_uses_operational_ledger": False,
         "r6_bridge_root": str(BRIDGE_ROOT),
         "r6_bridge_paused": _bridge_paused(store),
         "final_holdout_accessed": False,
@@ -133,6 +148,7 @@ def connected_status(store: AuditStore, gateway: MT5Gateway, cfg: Dict[str, Any]
         "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY),
         "execution_unlocked": demo_execution_enabled(cfg),
         "raw_intent_send_authority": False,
+        "diagnostic_preflight_uses_operational_ledger": False,
         "account": gateway.account_snapshot().__dict__,
         "symbol": gateway.symbol_snapshot().__dict__,
         "exposure": gateway.exposure_snapshot().__dict__,
@@ -179,7 +195,7 @@ def main() -> None:
                 print(json.dumps({"recovered": engine.recover_inflight()}, indent=2, sort_keys=True))
                 return
             if args.preflight_intent:
-                print(json.dumps(ExecutionEngine(store, gateway, execution_enabled=False).submit(load_intent(args.preflight_intent)), indent=2, sort_keys=True))
+                print(json.dumps(diagnostic_preflight(gateway, load_intent(args.preflight_intent)), indent=2, sort_keys=True))
                 return
 
             bridge = R6InboxProcessor(BRIDGE_ROOT, store, gateway, execution_enabled=execution_enabled)
