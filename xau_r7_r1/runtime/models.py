@@ -58,12 +58,27 @@ class OrderIntent:
     source: str
     # Adapter-generated intents carry the frozen ATR geometry so each broker
     # preflight can rematerialize stop/target from the latest executable quote.
-    # Manual intents leave all three fields None and retain absolute geometry.
     frozen_atr_usd: Optional[float] = None
     frozen_stop_atr: Optional[float] = None
     frozen_target_atr: Optional[float] = None
+    decision_fingerprint: Optional[str] = None
 
     def canonical_payload(self) -> Dict[str, Any]:
+        frozen = (self.frozen_atr_usd, self.frozen_stop_atr, self.frozen_target_atr)
+        if all(v is not None for v in frozen):
+            # Absolute stop/target are transient renderings of the same frozen
+            # ATR plan and must not create a false idempotency collision.
+            return {
+                "client_intent_id": self.client_intent_id,
+                "side": self.side,
+                "lot": self.lot,
+                "source": self.source,
+                "geometry_mode": "FROZEN_ATR",
+                "frozen_atr_usd": self.frozen_atr_usd,
+                "frozen_stop_atr": self.frozen_stop_atr,
+                "frozen_target_atr": self.frozen_target_atr,
+                "decision_fingerprint": self.decision_fingerprint,
+            }
         return asdict(self)
 
 
