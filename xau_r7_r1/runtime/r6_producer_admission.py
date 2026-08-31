@@ -13,8 +13,10 @@ class ProducerAdmissionError(RuntimeError):
     pass
 
 
-ADMISSION_VERSION = "R7_R1_R6_PRODUCER_ADMISSION_V1"
+ADMISSION_VERSION = "R7_R1_R6_PRODUCER_ADMISSION_V2"
 PARITY_SCHEMA = "V16_R6_CAUSAL_PRODUCER_PARITY_V1"
+EXPECTED_PARITY_TOOL_VERSION = "R7_R1_R6_PRODUCER_PARITY_TOOL_V1"
+EXPECTED_ISOLATION_SCHEMA = "V16_R6_CAUSAL_FIXTURE_ISOLATION_V1"
 
 REQUIRED_SOURCE_FILES: Tuple[str, ...] = (
     "v16r6/engine.py",
@@ -49,6 +51,16 @@ def _require_true(data: Dict[str, Any], key: str, error: str) -> None:
 def _require_false(data: Dict[str, Any], key: str, error: str) -> None:
     if data.get(key) is not False:
         raise ProducerAdmissionError(error)
+
+
+def _require_file_hash(path: Path, expected: Any, error: str) -> str:
+    path = Path(path)
+    if not path.is_file():
+        raise ProducerAdmissionError(error + "_FILE_MISSING")
+    digest = str(expected or "").lower()
+    if len(digest) != 64 or sha256_file(path) != digest:
+        raise ProducerAdmissionError(error + "_HASH_MISMATCH")
+    return digest
 
 
 def _parent_source_hashes(parent_manifest: Dict[str, Any]) -> Dict[str, str]:
@@ -111,15 +123,45 @@ def verify_parity_evidence(
     *,
     source_probe_path: Path,
     parity_path: Path,
+    reference_stream_path: Path,
+    producer_stream_path: Path,
+    isolation_path: Path,
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
     parity = _load_json(parity_path, "PRODUCER_PARITY")
     if parity.get("schema") != PARITY_SCHEMA:
         raise ProducerAdmissionError("PRODUCER_PARITY_SCHEMA_MISMATCH")
+    if parity.get("parity_tool_version") != EXPECTED_PARITY_TOOL_VERSION:
+        raise ProducerAdmissionError("PRODUCER_PARITY_TOOL_VERSION_MISMATCH")
     if parity.get("canonical_parent_zip_sha256") != CANONICAL_R6_ZIP_SHA256:
         raise ProducerAdmissionError("PRODUCER_PARITY_PARENT_SHA_MISMATCH")
     if parity.get("source_probe_sha256") != sha256_file(source_probe_path):
         raise ProducerAdmissionError("PRODUCER_PARITY_SOURCE_PROBE_HASH_MISMATCH")
+
+    reference_hash = _require_file_hash(
+        reference_stream_path, parity.get("reference_stream_sha256"), "PRODUCER_PARITY_REFERENCE_STREAM"
+    )
+    producer_stream_hash = _require_file_hash(
+        producer_stream_path, parity.get("producer_stream_sha256"), "PRODUCER_PARITY_PRODUCER_STREAM"
+    )
+    isolation_hash = _require_file_hash(
+        isolation_path, parity.get("isolation_manifest_sha256"), "PRODUCER_PARITY_ISOLATION"
+    )
+
+    isolation = _load_json(isolation_path, "PRODUCER_PARITY_ISOLATION")
+    if isolation.get("schema") != EXPECTED_ISOLATION_SCHEMA:
+        raise ProducerAdmissionError("PRODUCER_PARITY_ISOLATION_SCHEMA_MISMATCH")
+    if isolation.get("canonical_parent_zip_sha256") != CANONICAL_R6_ZIP_SHA256:
+        raise ProducerAdmissionError("PRODUCER_PARITY_ISOLATION_PARENT_SHA_MISMATCH")
+    if isolation.get("reference_stream_sha256") != reference_hash:
+        raise ProducerAdmissionError("PRODUCER_PARITY_ISOLATION_REFERENCE_HASH_MISMATCH")
+    if isolation.get("producer_stream_sha256") != producer_stream_hash:
+        raise ProducerAdmissionError("PRODUCER_PARITY_ISOLATION_PRODUCER_HASH_MISMATCH")
+    _require_true(isolation, "causal_prefix_fixture_generation", "PRODUCER_PARITY_ISOLATION_NOT_CAUSAL_PREFIX")
+    _require_false(isolation, "future_rows_available_to_producer", "PRODUCER_PARITY_ISOLATION_FUTURE_ROWS_AVAILABLE")
+    _require_false(isolation, "outcome_columns_present", "PRODUCER_PARITY_ISOLATION_OUTCOMES_PRESENT")
+    _require_false(isolation, "final_holdout_accessed", "PRODUCER_PARITY_ISOLATION_HOLDOUT_BOUNDARY_BREACH")
+    _require_false(isolation, "strategy_retuned", "PRODUCER_PARITY_ISOLATION_RETUNING_BREACH")
 
     producer_rel = str(parity.get("producer_module", "")).replace("\\", "/")
     if not producer_rel or producer_rel.startswith("/") or ".." in Path(producer_rel).parts:
@@ -152,6 +194,9 @@ def verify_parity_evidence(
     mismatches = _strict_nonnegative_int(parity.get("mismatch_count"), "PRODUCER_PARITY_MISMATCH_COUNT")
     lookahead = _strict_nonnegative_int(parity.get("lookahead_violations"), "PRODUCER_PARITY_LOOKAHEAD_VIOLATIONS")
     retired = _strict_nonnegative_int(parity.get("retired_source_emissions"), "PRODUCER_PARITY_RETIRED_SOURCE_EMISSIONS")
+    isolation_fixtures = _strict_nonnegative_int(isolation.get("fixture_count"), "PRODUCER_PARITY_ISOLATION_FIXTURE_COUNT")
+    if fixtures != isolation_fixtures:
+        raise ProducerAdmissionError("PRODUCER_PARITY_ISOLATION_FIXTURE_COUNT_MISMATCH")
     if fixtures <= 0 or compared <= 0:
         raise ProducerAdmissionError("PRODUCER_PARITY_EVIDENCE_EMPTY")
     if mismatches != 0:
@@ -177,6 +222,9 @@ def verify_parity_evidence(
     return {
         "producer_module": producer_rel,
         "producer_module_sha256": expected_producer_hash,
+        "reference_stream_sha256": reference_hash,
+        "producer_stream_sha256": producer_stream_hash,
+        "isolation_manifest_sha256": isolation_hash,
         "fixture_count": fixtures,
         "compared_decisions": compared,
         "frozen_sources_covered": sorted(covered_set),
@@ -190,18 +238,31 @@ def verify_producer_admission(
     parent_manifest_path: Optional[Path] = None,
     source_probe_path: Optional[Path] = None,
     parity_path: Optional[Path] = None,
+    reference_stream_path: Optional[Path] = None,
+    producer_stream_path: Optional[Path] = None,
+    isolation_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
     parent_manifest_path = parent_manifest_path or root / "R7_R1_PARENT_INTEGRITY.json"
     source_probe_path = source_probe_path or root / "R7_R1_R6_SOURCE_PROBE.json"
     parity_path = parity_path or root / "R7_R1_R6_PRODUCER_PARITY.json"
+    reference_stream_path = reference_stream_path or root / "R7_R1_R6_REFERENCE_STREAM.jsonl"
+    producer_stream_path = producer_stream_path or root / "R7_R1_R6_PRODUCER_STREAM.jsonl"
+    isolation_path = isolation_path or root / "R7_R1_R6_PARITY_ISOLATION.json"
 
     source_hashes = verify_source_probe(
         root,
         parent_manifest_path=parent_manifest_path,
         source_probe_path=source_probe_path,
     )
-    parity = verify_parity_evidence(root, source_probe_path=source_probe_path, parity_path=parity_path)
+    parity = verify_parity_evidence(
+        root,
+        source_probe_path=source_probe_path,
+        parity_path=parity_path,
+        reference_stream_path=reference_stream_path,
+        producer_stream_path=producer_stream_path,
+        isolation_path=isolation_path,
+    )
     return {
         "admission_version": ADMISSION_VERSION,
         "ready": True,
