@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from .constants import CANONICAL_R6_ZIP_SHA256, RETIRED_SOURCE, R6_SOURCE_PRIORITY
 from .r6_integrity import sha256_file
+from .r6_producer_replay import ProducerReplayError, verify_replay_evidence
 from .r6_source_bundle import BUNDLE_VERSION
 from .r6_source_probe import PROBE_VERSION
 
@@ -14,10 +15,11 @@ class ProducerAdmissionError(RuntimeError):
     pass
 
 
-ADMISSION_VERSION = "R7_R1_R6_PRODUCER_ADMISSION_V3"
+ADMISSION_VERSION = "R7_R1_R6_PRODUCER_ADMISSION_V4"
 PARITY_SCHEMA = "V16_R6_CAUSAL_PRODUCER_PARITY_V1"
-EXPECTED_PARITY_TOOL_VERSION = "R7_R1_R6_PRODUCER_PARITY_TOOL_V2"
-EXPECTED_ISOLATION_SCHEMA = "V16_R6_CAUSAL_FIXTURE_ISOLATION_V1"
+EXPECTED_PARITY_TOOL_VERSION = "R7_R1_R6_PRODUCER_PARITY_TOOL_V3"
+EXPECTED_ISOLATION_SCHEMA = "V16_R6_CAUSAL_FIXTURE_ISOLATION_V2"
+PRODUCER_MODULE_RELATIVE = "r7_runtime/r6_causal_producer.py"
 
 REQUIRED_SOURCE_FILES: Tuple[str, ...] = (
     "v16r6/engine.py",
@@ -258,6 +260,8 @@ def verify_parity_evidence(
     *,
     source_probe_path: Path,
     source_bundle_manifest_path: Path,
+    fixture_path: Path,
+    replay_attestation_path: Path,
     parity_path: Path,
     reference_stream_path: Path,
     producer_stream_path: Path,
@@ -275,6 +279,10 @@ def verify_parity_evidence(
         raise ProducerAdmissionError("PRODUCER_PARITY_SOURCE_PROBE_HASH_MISMATCH")
     if parity.get("source_bundle_manifest_sha256") != sha256_file(source_bundle_manifest_path):
         raise ProducerAdmissionError("PRODUCER_PARITY_SOURCE_BUNDLE_HASH_MISMATCH")
+    if parity.get("fixture_corpus_sha256") != sha256_file(fixture_path):
+        raise ProducerAdmissionError("PRODUCER_PARITY_FIXTURE_HASH_MISMATCH")
+    if parity.get("producer_replay_attestation_sha256") != sha256_file(replay_attestation_path):
+        raise ProducerAdmissionError("PRODUCER_PARITY_REPLAY_HASH_MISMATCH")
 
     reference_hash = _require_file_hash(
         reference_stream_path, parity.get("reference_stream_sha256"), "PRODUCER_PARITY_REFERENCE_STREAM"
@@ -295,14 +303,20 @@ def verify_parity_evidence(
         raise ProducerAdmissionError("PRODUCER_PARITY_ISOLATION_REFERENCE_HASH_MISMATCH")
     if isolation.get("producer_stream_sha256") != producer_stream_hash:
         raise ProducerAdmissionError("PRODUCER_PARITY_ISOLATION_PRODUCER_HASH_MISMATCH")
+    if isolation.get("fixture_corpus_sha256") != sha256_file(fixture_path):
+        raise ProducerAdmissionError("PRODUCER_PARITY_ISOLATION_FIXTURE_HASH_MISMATCH")
+    if isolation.get("producer_replay_attestation_sha256") != sha256_file(replay_attestation_path):
+        raise ProducerAdmissionError("PRODUCER_PARITY_ISOLATION_REPLAY_HASH_MISMATCH")
     _require_true(isolation, "causal_prefix_fixture_generation", "PRODUCER_PARITY_ISOLATION_NOT_CAUSAL_PREFIX")
+    _require_true(isolation, "trusted_producer_replay", "PRODUCER_PARITY_ISOLATION_TRUSTED_REPLAY_MISSING")
+    _require_true(isolation, "producer_source_policy_pass", "PRODUCER_PARITY_ISOLATION_SOURCE_POLICY_MISSING")
     _require_false(isolation, "future_rows_available_to_producer", "PRODUCER_PARITY_ISOLATION_FUTURE_ROWS_AVAILABLE")
     _require_false(isolation, "outcome_columns_present", "PRODUCER_PARITY_ISOLATION_OUTCOMES_PRESENT")
     _require_false(isolation, "final_holdout_accessed", "PRODUCER_PARITY_ISOLATION_HOLDOUT_BOUNDARY_BREACH")
     _require_false(isolation, "strategy_retuned", "PRODUCER_PARITY_ISOLATION_RETUNING_BREACH")
 
     producer_rel = str(parity.get("producer_module", "")).replace("\\", "/")
-    if not producer_rel or producer_rel.startswith("/") or ".." in Path(producer_rel).parts:
+    if producer_rel != PRODUCER_MODULE_RELATIVE:
         raise ProducerAdmissionError("PRODUCER_MODULE_PATH_INVALID")
     producer_path = (root / producer_rel).resolve()
     try:
@@ -315,6 +329,8 @@ def verify_parity_evidence(
     if len(expected_producer_hash) != 64 or sha256_file(producer_path) != expected_producer_hash:
         raise ProducerAdmissionError("PRODUCER_MODULE_HASH_MISMATCH")
 
+    _require_true(parity, "trusted_producer_replay_pass", "PRODUCER_TRUSTED_REPLAY_NOT_PASS")
+    _require_true(parity, "producer_source_policy_pass", "PRODUCER_SOURCE_POLICY_NOT_PASS")
     _require_true(parity, "parity_pass", "PRODUCER_PARITY_NOT_PASS")
     _require_true(parity, "causal_prefix_only", "PRODUCER_PARITY_NOT_CAUSAL_PREFIX_ONLY")
     _require_true(parity, "signal_selection_parity", "PRODUCER_SIGNAL_SELECTION_PARITY_MISSING")
@@ -361,12 +377,16 @@ def verify_parity_evidence(
         "producer_module": producer_rel,
         "producer_module_sha256": expected_producer_hash,
         "source_bundle_manifest_sha256": sha256_file(source_bundle_manifest_path),
+        "fixture_corpus_sha256": sha256_file(fixture_path),
+        "producer_replay_attestation_sha256": sha256_file(replay_attestation_path),
         "reference_stream_sha256": reference_hash,
         "producer_stream_sha256": producer_stream_hash,
         "isolation_manifest_sha256": isolation_hash,
         "fixture_count": fixtures,
         "compared_decisions": compared,
         "frozen_sources_covered": sorted(covered_set),
+        "trusted_producer_replay_pass": True,
+        "producer_source_policy_pass": True,
         "parity_pass": True,
     }
 
@@ -377,19 +397,25 @@ def verify_producer_admission(
     parent_manifest_path: Optional[Path] = None,
     source_probe_path: Optional[Path] = None,
     source_bundle_manifest_path: Optional[Path] = None,
+    fixture_path: Optional[Path] = None,
+    replay_attestation_path: Optional[Path] = None,
     parity_path: Optional[Path] = None,
     reference_stream_path: Optional[Path] = None,
     producer_stream_path: Optional[Path] = None,
     isolation_path: Optional[Path] = None,
+    producer_module_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
     parent_manifest_path = parent_manifest_path or root / "R7_R1_PARENT_INTEGRITY.json"
     source_probe_path = source_probe_path or root / "R7_R1_R6_SOURCE_PROBE.json"
     source_bundle_manifest_path = source_bundle_manifest_path or root / "R7_R1_R6_SOURCE_BUNDLE_MANIFEST.json"
+    fixture_path = fixture_path or root / "R7_R1_R6_PARITY_FIXTURES.jsonl"
+    replay_attestation_path = replay_attestation_path or root / "R7_R1_R6_PRODUCER_REPLAY.json"
     parity_path = parity_path or root / "R7_R1_R6_PRODUCER_PARITY.json"
     reference_stream_path = reference_stream_path or root / "R7_R1_R6_REFERENCE_STREAM.jsonl"
     producer_stream_path = producer_stream_path or root / "R7_R1_R6_PRODUCER_STREAM.jsonl"
     isolation_path = isolation_path or root / "R7_R1_R6_PARITY_ISOLATION.json"
+    producer_module_path = producer_module_path or root / PRODUCER_MODULE_RELATIVE
 
     bundle = verify_source_bundle(
         root,
@@ -402,10 +428,21 @@ def verify_producer_admission(
         parent_manifest_path=parent_manifest_path,
         source_probe_path=source_probe_path,
     )
+    try:
+        replay = verify_replay_evidence(
+            fixture_path,
+            producer_module_path,
+            producer_stream_path,
+            replay_attestation_path,
+        )
+    except ProducerReplayError as exc:
+        raise ProducerAdmissionError("PRODUCER_TRUSTED_REPLAY_FAILED:" + str(exc)) from exc
     parity = verify_parity_evidence(
         root,
         source_probe_path=source_probe_path,
         source_bundle_manifest_path=source_bundle_manifest_path,
+        fixture_path=fixture_path,
+        replay_attestation_path=replay_attestation_path,
         parity_path=parity_path,
         reference_stream_path=reference_stream_path,
         producer_stream_path=producer_stream_path,
@@ -417,6 +454,7 @@ def verify_producer_admission(
         "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
         "source_bundle": bundle,
         "source_hashes": source_hashes,
+        "trusted_replay": replay,
         "parity": parity,
         "final_holdout_accessed": False,
         "strategy_retuned": False,
