@@ -6,7 +6,7 @@ import math
 import time
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from .constants import (
     CANONICAL_R6_ZIP_SHA256,
@@ -60,23 +60,10 @@ class AdaptedDecision:
 
 
 _REQUIRED_FIELDS = {
-    "schema",
-    "policy",
-    "parent_zip_sha256",
-    "decision_id",
-    "signal_bar_ms",
-    "emitted_at_ms",
-    "side",
-    "source",
-    "priority",
-    "family",
-    "signal_type",
-    "atr_usd",
-    "stop_atr",
-    "target_atr",
-    "geometry_used",
-    "lot_size",
-    "admitted",
+    "schema", "policy", "parent_zip_sha256", "decision_id",
+    "signal_bar_ms", "emitted_at_ms", "side", "source", "priority",
+    "family", "signal_type", "atr_usd", "stop_atr", "target_atr",
+    "geometry_used", "lot_size", "admitted",
 }
 
 
@@ -114,7 +101,7 @@ def _geometry_pair_close(actual_stop: float, actual_target: float, expected: Tup
     return abs(actual_stop - expected[0]) <= 1e-12 and abs(actual_target - expected[1]) <= 1e-12
 
 
-def _round_price_to_point(value: float, point: float) -> float:
+def round_price_to_point(value: float, point: float) -> float:
     if not math.isfinite(value) or value <= 0:
         raise DecisionAdapterError("DERIVED_PRICE_INVALID")
     if not math.isfinite(point) or point <= 0:
@@ -125,7 +112,7 @@ def _round_price_to_point(value: float, point: float) -> float:
     return float(units * d_point)
 
 
-def _client_intent_id(decision_id: str) -> str:
+def client_intent_id(decision_id: str) -> str:
     digest = hashlib.sha256(decision_id.encode("utf-8")).hexdigest()[:R6_INTENT_ID_HASH_HEX]
     return "r6_" + digest
 
@@ -133,10 +120,8 @@ def _client_intent_id(decision_id: str) -> str:
 class R6DecisionAdapter:
     """Translate an already-admitted frozen R6 decision into an OrderIntent.
 
-    This class deliberately does not select signals, models, families, geometry,
-    or size. Those decisions must already have been made by the frozen R6
-    decision authority. The adapter verifies that frozen output and translates
-    ATR geometry onto the current broker market quote.
+    This class never selects signals, models, families, geometry, or size. Those
+    choices must already have been made by the frozen R6 decision authority.
     """
 
     def parse(self, raw_bytes: bytes, *, now_ms: Optional[int] = None) -> Tuple[AdmittedR6Decision, str]:
@@ -209,15 +194,10 @@ class R6DecisionAdapter:
             if family != R6_SOURCE_FAMILY[source]:
                 raise DecisionAdapterError("DECISION_SOURCE_FAMILY_MISMATCH")
         elif source == "CORE":
-            # Protected validation carries an empty family on CORE rows. A live
-            # producer may also explicitly label it BASE, but must identify the
-            # exact signal type and may not invent a lane family.
             if family not in {"", "BASE"}:
                 raise DecisionAdapterError("DECISION_CORE_FAMILY_INVALID")
             if not signal_type:
                 raise DecisionAdapterError("DECISION_CORE_SIGNAL_TYPE_REQUIRED")
-        else:  # defensive: source allow-list above should make this unreachable
-            raise DecisionAdapterError("DECISION_SOURCE_UNHANDLED")
 
         if source in {"TIME_LANE", "ADAPTIVE_LTM_RIDGE"}:
             expected = R6_LTM_GEOMETRY.get(geometry)
@@ -234,8 +214,8 @@ class R6DecisionAdapter:
         elif source == "CORE":
             if geometry != "PRIMARY":
                 raise DecisionAdapterError("DECISION_CORE_GEOMETRY_MUST_BE_PRIMARY")
-            # CORE geometry is signal-specific in frozen validation. Do not
-            # infer or overwrite the selected positive finite stop/target pair.
+            # CORE geometry is signal-specific in protected validation. Carry the
+            # frozen selected pair; never infer a replacement pair here.
 
         now = int(time.time() * 1000) if now_ms is None else _strict_int(now_ms, "DECISION_NOW_MS")
         age_ms = now - emitted_at_ms
@@ -244,26 +224,14 @@ class R6DecisionAdapter:
         if age_ms > int(R6_DECISION_MAX_AGE_SECONDS * 1000):
             raise DecisionAdapterError("DECISION_STALE")
 
-        decision = AdmittedR6Decision(
-            schema=schema,
-            policy=policy,
-            parent_zip_sha256=parent.lower(),
-            decision_id=decision_id,
-            signal_bar_ms=signal_bar_ms,
-            emitted_at_ms=emitted_at_ms,
-            side=side,
-            source=source,
-            priority=priority,
-            family=family,
-            signal_type=signal_type,
-            atr_usd=atr,
-            stop_atr=stop_atr,
-            target_atr=target_atr,
-            geometry_used=geometry,
-            lot_size=lot,
-            admitted=admitted,
-        )
-        return decision, raw_sha256
+        return AdmittedR6Decision(
+            schema=schema, policy=policy, parent_zip_sha256=parent.lower(),
+            decision_id=decision_id, signal_bar_ms=signal_bar_ms,
+            emitted_at_ms=emitted_at_ms, side=side, source=source,
+            priority=priority, family=family, signal_type=signal_type,
+            atr_usd=atr, stop_atr=stop_atr, target_atr=target_atr,
+            geometry_used=geometry, lot_size=lot, admitted=admitted,
+        ), raw_sha256
 
     def adapt(self, raw_bytes: bytes, symbol: SymbolSnapshot, *, now_ms: Optional[int] = None) -> AdaptedDecision:
         decision, raw_sha256 = self.parse(raw_bytes, now_ms=now_ms)
@@ -281,25 +249,22 @@ class R6DecisionAdapter:
             stop = entry + decision.stop_atr * decision.atr_usd
             target = entry - decision.target_atr * decision.atr_usd
             side = "SELL"
-
-        stop = _round_price_to_point(stop, symbol.point)
-        target = _round_price_to_point(target, symbol.point)
+        stop = round_price_to_point(stop, symbol.point)
+        target = round_price_to_point(target, symbol.point)
         if side == "BUY" and not (stop < entry < target):
             raise DecisionAdapterError("DERIVED_LONG_GEOMETRY_INVALID")
         if side == "SELL" and not (target < entry < stop):
             raise DecisionAdapterError("DERIVED_SHORT_GEOMETRY_INVALID")
 
         intent = OrderIntent(
-            client_intent_id=_client_intent_id(decision.decision_id),
+            client_intent_id=client_intent_id(decision.decision_id),
             side=side,
             lot=decision.lot_size,
             stop_price=stop,
             take_profit_price=target,
             source=decision.source,
+            frozen_atr_usd=decision.atr_usd,
+            frozen_stop_atr=decision.stop_atr,
+            frozen_target_atr=decision.target_atr,
         )
-        return AdaptedDecision(
-            decision=decision,
-            intent=intent,
-            raw_sha256=raw_sha256,
-            derived_entry_price=entry,
-        )
+        return AdaptedDecision(decision, intent, raw_sha256, entry)
