@@ -15,8 +15,6 @@ MAX_CANONICAL_LOT = 0.02
 MAX_SIMULTANEOUS_SYMBOL_EXPOSURES = 1
 
 # Protected R5 validation records 0.0945 SGD commission at 0.01 lot.
-# Projected stop risk must therefore include the same round-turn commission burden
-# in addition to MT5 OrderCalcProfit stop P/L.
 COMMISSION_RT_SGD_PER_001_LOT = 0.0945
 
 RETIRED_SOURCE = "AUX_RF_LTM"
@@ -34,14 +32,16 @@ COMMENT_PREFIX = "R7R1:"
 EXECUTION_UNLOCK_ENV = "XAU_R7_R1_ENABLE_DEMO_EXECUTION"
 EXECUTION_UNLOCK_VALUE = "YES_I_ACCEPT_DEMO_ONLY"
 
-# Frozen bridge contract. This is intentionally narrow: R7-R1 consumes an
-# already-admitted R6 decision and must never re-select or retune the strategy.
+# Frozen bridge contract. R7-R1 consumes an already-admitted R6 decision and
+# never re-selects or retunes the strategy.
 R6_DECISION_SCHEMA = "V16_R6_ADMITTED_DECISION_V1"
 R6_DECISION_POLICY = "FROZEN_V16_R6"
 R6_DECISION_MAX_AGE_SECONDS = 300.0
 R6_DECISION_MAX_FUTURE_SECONDS = 2.0
 R6_DECISION_ID_MAX_LENGTH = 64
 R6_INTENT_ID_HASH_HEX = 16
+R6_BRIDGE_PAUSE_STATE_KEY = "r6_bridge_manual_review_pause"
+R6_BRIDGE_RESUME_ACK = "I_REVIEWED_MT5_AND_ACCEPT_RESUME"
 
 R6_SOURCE_PRIORITY = {
     "CORE": 0,
