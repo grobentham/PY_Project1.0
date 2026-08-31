@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import ast
 import hashlib
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -190,3 +192,20 @@ def probe_frozen_r6_source(root: Path) -> Dict:
             for relative, probe in files.items()
         },
     }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Probe exact frozen R5/R6 source without executing strategy code")
+    parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    report = probe_frozen_r6_source(args.root)
+    text = json.dumps(report, indent=2, sort_keys=True)
+    if args.output is not None:
+        args.output.write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+
+
+if __name__ == "__main__":
+    main()
