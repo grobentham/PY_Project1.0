@@ -13,8 +13,8 @@ from .constants import (
     R6_COMPRESSION_GEOMETRY, R6_DECISION_ID_MAX_LENGTH,
     R6_DECISION_MAX_AGE_SECONDS, R6_DECISION_MAX_FUTURE_SECONDS,
     R6_DECISION_POLICY, R6_DECISION_SCHEMA, R6_EXECUTION_AUTHORITY,
-    R6_INTENT_ID_HASH_HEX, R6_LTM_GEOMETRY, R6_SOURCE_FAMILY,
-    R6_SOURCE_PRIORITY,
+    R6_INTENT_ID_HASH_HEX, R6_LTM_GEOMETRY, R6_SIGNAL_MAX_AGE_SECONDS,
+    R6_SOURCE_FAMILY, R6_SOURCE_PRIORITY,
 )
 from .models import OrderIntent, SymbolSnapshot
 
@@ -208,11 +208,16 @@ class R6DecisionAdapter:
             raise DecisionAdapterError("DECISION_CORE_GEOMETRY_MUST_BE_PRIMARY")
 
         now = int(time.time() * 1000) if now_ms is None else _strict_int(now_ms, "DECISION_NOW_MS")
-        age_ms = now - emitted_at_ms
-        if age_ms < -int(R6_DECISION_MAX_FUTURE_SECONDS * 1000):
+        emitted_age_ms = now - emitted_at_ms
+        if emitted_age_ms < -int(R6_DECISION_MAX_FUTURE_SECONDS * 1000):
             raise DecisionAdapterError("DECISION_TIMESTAMP_TOO_FAR_IN_FUTURE")
-        if age_ms > int(R6_DECISION_MAX_AGE_SECONDS * 1000):
+        if emitted_age_ms > int(R6_DECISION_MAX_AGE_SECONDS * 1000):
             raise DecisionAdapterError("DECISION_STALE")
+        signal_age_ms = now - signal_bar_ms
+        if signal_age_ms < -int(R6_DECISION_MAX_FUTURE_SECONDS * 1000):
+            raise DecisionAdapterError("DECISION_SIGNAL_TIMESTAMP_TOO_FAR_IN_FUTURE")
+        if signal_age_ms > int(R6_SIGNAL_MAX_AGE_SECONDS * 1000):
+            raise DecisionAdapterError("DECISION_SIGNAL_STALE")
 
         return AdmittedR6Decision(
             schema=schema, policy=policy, parent_zip_sha256=parent.lower(),
