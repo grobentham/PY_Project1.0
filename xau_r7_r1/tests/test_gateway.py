@@ -16,15 +16,29 @@ class FakeMT5:
     SYMBOL_FILLING_IOC = 2
     SYMBOL_FILLING_FOK = 1
     SYMBOL_TRADE_EXECUTION_MARKET = 2
+    ACCOUNT_TRADE_MODE_DEMO = 0
 
     def __init__(self):
         self.positions_value = ()
         self.orders_value = ()
         self.deals_value = ()
         self.profit_value = -5.0
+        self.account_value = SimpleNamespace(
+            login=12345,
+            server="BlueberryMarkets-Demo",
+            currency="SGD",
+            trade_mode=self.ACCOUNT_TRADE_MODE_DEMO,
+        )
+        self.symbol_value = SimpleNamespace(point=0.01)
 
     def last_error(self):
         return (1, "fake")
+
+    def account_info(self):
+        return self.account_value
+
+    def symbol_info(self, symbol):
+        return self.symbol_value
 
     def positions_get(self, **kwargs):
         return self.positions_value
@@ -43,6 +57,8 @@ class GatewayTests(unittest.TestCase):
     def gateway(self):
         gw = MT5Gateway()
         gw.mt5 = FakeMT5()
+        gw.connected_login = 12345
+        gw.connected_server = "BlueberryMarkets-Demo"
         return gw
 
     def test_projected_stop_loss_includes_frozen_round_turn_commission(self):
@@ -88,6 +104,18 @@ class GatewayTests(unittest.TestCase):
         intent = OrderIntent("x", "BUY", 0.01, 2999.0, 3002.0, "BASE")
         with self.assertRaises(GatewayError):
             gw.projected_stop_loss_sgd(intent, 3000.0)
+
+    def test_account_switch_is_detected_on_sensitive_read(self):
+        gw = self.gateway()
+        gw.mt5.account_value.login = 99999
+        with self.assertRaisesRegex(GatewayError, "ACCOUNT_SWITCH_DETECTED"):
+            gw.exposure_snapshot()
+
+    def test_server_switch_is_detected_on_sensitive_read(self):
+        gw = self.gateway()
+        gw.mt5.account_value.server = "BlueberryMarkets-Demo-Other"
+        with self.assertRaisesRegex(GatewayError, "ACCOUNT_SERVER_SWITCH_DETECTED"):
+            gw.find_intent_at_broker("x")
 
 
 if __name__ == "__main__":
