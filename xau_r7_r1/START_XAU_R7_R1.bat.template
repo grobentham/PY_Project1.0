@@ -20,17 +20,22 @@ if %errorlevel%==0 (
 cls
 echo ============================================================
 echo XAU V16 R7-R1 - FULL RUNTIME REPAIR
-echo Frozen R6 policy integrity is verified at every R7-R1 start.
-echo Live-account execution is prohibited. Demo sending is locked.
+echo Frozen R6 package/state integrity is checked before MT5 use.
+echo LIVE ACCOUNT EXECUTION IS PROHIBITED.
+echo Raw/manual intents have NO order-send authority.
+echo Automatic R6 decisions require the two-part DEMO unlock.
 echo ============================================================
 echo.
-echo [1] Offline software + parent integrity status
+echo [1] Offline package + persistent-state integrity status
 echo [2] MT5 account / quote / exposure status
-echo [3] Crash-recovery reconciliation
-echo [4] Preflight an R6-derived intent JSON - NO SEND
-echo [5] Submit an intent to DEMO - requires explicit unlock
-echo [6] Run preserved frozen R6 launcher
-echo [7] Exit
+echo [3] Crash-recovery reconciliation - NEVER AUTO-RESENDS
+echo [4] Diagnostic raw-intent preflight - NO SEND
+echo [5] Open frozen-R6 decision inbox folder
+echo [6] Process one admitted R6 decision from inbox
+echo [7] Drain current admitted R6 decision inbox
+echo [8] Run automatic admitted R6 inbox loop
+echo [9] Clear manual-review pause after MT5 review
+echo [0] Exit
 echo.
 set /p CHOICE=Select: 
 
@@ -47,26 +52,46 @@ if "%CHOICE%"=="3" (
     goto PAUSEMENU
 )
 if "%CHOICE%"=="4" (
-    set /p INTENT=Intent JSON path: 
+    echo Diagnostic only. This path cannot send an order.
+    set /p INTENT=Raw intent JSON path: 
     %PY% -m r7_runtime.runtime --preflight-intent "%INTENT%"
     goto PAUSEMENU
 )
 if "%CHOICE%"=="5" (
-    echo.
-    echo Demo order sending requires BOTH:
-    echo   1. R7_R1_RUNTIME_CONFIG.json: request_demo_execution = true
-    echo   2. Environment variable:
-    echo      XAU_R7_R1_ENABLE_DEMO_EXECUTION=YES_I_ACCEPT_DEMO_ONLY
-    echo.
-    set /p INTENT=Intent JSON path: 
-    %PY% -m r7_runtime.runtime --submit-intent "%INTENT%"
-    goto PAUSEMENU
+    if not exist "r7_r6_bridge\inbox" mkdir "r7_r6_bridge\inbox"
+    start "" explorer.exe "%CD%\r7_r6_bridge\inbox"
+    goto MENU
 )
 if "%CHOICE%"=="6" (
-    %PY% -m r7_runtime.legacy_launcher
+    echo.
+    echo This consumes ONLY a validated FROZEN_V16_R6 admitted-decision JSON.
+    echo DEMO sending remains locked unless BOTH explicit unlocks are present.
+    set /p DECISION=Decision filename already inside r7_r6_bridge\inbox: 
+    %PY% -m r7_runtime.runtime --process-r6-decision "r7_r6_bridge\inbox\%DECISION%"
     goto PAUSEMENU
 )
-if "%CHOICE%"=="7" exit /b 0
+if "%CHOICE%"=="7" (
+    echo DEMO sending remains locked unless BOTH explicit unlocks are present.
+    %PY% -m r7_runtime.runtime --drain-r6-inbox
+    goto PAUSEMENU
+)
+if "%CHOICE%"=="8" (
+    echo.
+    echo Automatic inbox execution is DEMO-ONLY and stops on any manual-review state.
+    echo Press Ctrl+C to stop the loop.
+    %PY% -m r7_runtime.runtime --run-r6-inbox
+    goto PAUSEMENU
+)
+if "%CHOICE%"=="9" (
+    echo.
+    echo Resume is refused if MT5 still shows ANY XAU exposure or unresolved in-flight intent.
+    echo Exact acknowledgement required:
+    echo I_REVIEWED_MT5_AND_ACCEPT_RESUME
+    set /p ACK=Type acknowledgement: 
+    %PY% -m r7_runtime.runtime --clear-r6-pause --resume-ack "%ACK%"
+    goto PAUSEMENU
+)
+if "%CHOICE%"=="0" exit /b 0
 
 echo [ERROR] Invalid selection.
 
