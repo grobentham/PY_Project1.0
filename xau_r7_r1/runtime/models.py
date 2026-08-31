@@ -49,6 +49,19 @@ class ExposureSnapshot:
 
 
 @dataclass(frozen=True)
+class OwnedPositionSnapshot:
+    ticket: int
+    symbol: str
+    side: str
+    volume: float
+    price_open: float
+    sl: float
+    tp: float
+    magic: int
+    comment: str
+
+
+@dataclass(frozen=True)
 class OrderIntent:
     client_intent_id: str
     side: str
