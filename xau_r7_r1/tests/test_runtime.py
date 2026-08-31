@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from r7_runtime.audit_store import AuditStore, StoreError
+from r7_runtime.constants import R6_EXECUTION_AUTHORITY
 from r7_runtime.execution import ExecutionEngine
 from r7_runtime.models import AccountSnapshot, BrokerMatch, ExposureSnapshot, OrderIntent, SymbolSnapshot
 
@@ -57,7 +58,7 @@ class FakeGateway:
         return self.loss
 
     def build_market_request(self, intent, entry):
-        return {"price": entry, "symbol": "XAUUSD.i", "volume": intent.lot}
+        return {"price": entry, "symbol": "XAUUSD.i", "volume": intent.lot, "sl": intent.stop_price, "tp": intent.take_profit_price}
 
     def order_check(self, request):
         return True
@@ -76,7 +77,16 @@ class FakeGateway:
         return self.match_before_send
 
 
-def intent(intent_id="abc", loss_source="BASE", lot=0.01):
+def intent(intent_id="abc", loss_source="TIME_LANE", lot=0.01, *, authorized=True):
+    if authorized:
+        return OrderIntent(
+            intent_id, "BUY", lot, 2999.2, 3002.2, loss_source,
+            frozen_atr_usd=1.0,
+            frozen_stop_atr=1.0,
+            frozen_target_atr=2.0,
+            decision_fingerprint="a" * 64,
+            execution_authority=R6_EXECUTION_AUTHORITY,
+        )
     return OrderIntent(intent_id, "BUY", lot, 2999.0, 3002.0, loss_source)
 
 
@@ -90,59 +100,58 @@ class RuntimeTests(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def test_dry_run_never_sends(self):
+    def test_raw_intent_cannot_send_even_when_execution_enabled(self):
+        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
+        result = engine.submit(intent("raw", authorized=False))
+        self.assertEqual(result["state"], "BLOCKED")
+        self.assertEqual(result["reason"], "FROZEN_R6_EXECUTION_AUTHORITY_REQUIRED")
+        self.assertEqual(self.gateway.send_calls, 0)
+
+    def test_dry_run_raw_intent_is_diagnostic_only_and_never_sends(self):
         engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
-        result = engine.submit(intent())
+        result = engine.submit(intent("dryraw", authorized=False))
         self.assertEqual(result["state"], "DRY_RUN_COMPLETE")
         self.assertEqual(self.gateway.send_calls, 0)
 
     def test_exact_operating_cap_is_allowed(self):
         self.gateway.loss = 5.5
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
-        result = engine.submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=False).submit(intent())
         self.assertEqual(result["state"], "DRY_RUN_COMPLETE")
 
     def test_operating_cap_blocks(self):
         self.gateway.loss = 5.5001
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
-        result = engine.submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=False).submit(intent())
         self.assertEqual(result["state"], "BLOCKED")
         self.assertEqual(result["reason"], "OPERATING_RISK_CAP_BREACH")
 
     def test_constitutional_cap_blocks(self):
         self.gateway.loss = 6.1
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
-        result = engine.submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=False).submit(intent())
         self.assertEqual(result["reason"], "CONSTITUTIONAL_RISK_CEILING_BREACH")
 
     def test_projected_equity_floor_blocks(self):
         self.gateway.equity = 850.1
         self.gateway.loss = 0.2
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
-        result = engine.submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=False).submit(intent())
         self.assertEqual(result["reason"], "PROJECTED_EQUITY_FLOOR_BREACH")
 
     def test_max_lot_blocks_003(self):
         self.gateway.loss = 1.0
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
-        result = engine.submit(intent(lot=0.03))
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=False).submit(intent(lot=0.03))
         self.assertEqual(result["reason"], "MAX_CANONICAL_EXPOSURE_EXCEEDED")
 
     def test_retired_source_blocks(self):
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
-        result = engine.submit(intent(loss_source="AUX_RF_LTM"))
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=False).submit(intent(loss_source="AUX_RF_LTM"))
         self.assertEqual(result["reason"], "RETIRED_SOURCE_AUX_RF_LTM")
 
     def test_existing_position_blocks(self):
         self.gateway.exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
-        result = engine.submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=False).submit(intent())
         self.assertEqual(result["reason"], "EXISTING_XAU_EXPOSURE_BLOCK")
 
     def test_existing_pending_order_blocks(self):
         self.gateway.exposure = ExposureSnapshot(0, 1, 0.0, 0.01)
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
-        result = engine.submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=False).submit(intent())
         self.assertEqual(result["reason"], "EXISTING_XAU_EXPOSURE_BLOCK")
 
     def test_duplicate_submit_is_suppressed_locally(self):
@@ -156,15 +165,13 @@ class RuntimeTests(unittest.TestCase):
     def test_broker_side_duplicate_is_acknowledged_without_send(self):
         self.gateway.match_before_send = BrokerMatch(True, "DEAL", 991, "HISTORICAL")
         self.gateway.post_send_exposure = ExposureSnapshot(0, 0, 0.0, 0.0)
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
-        result = engine.submit(intent("brokerdup"))
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("brokerdup"))
         self.assertEqual(result["state"], "ACKNOWLEDGED")
         self.assertEqual(self.gateway.send_calls, 0)
 
     def test_broker_duplicate_query_failure_fails_safe(self):
         self.gateway.broker_lookup_error = True
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
-        result = engine.submit(intent("lookuperr"))
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("lookuperr"))
         self.assertEqual(result["state"], "FAILED_SAFE")
         self.assertEqual(self.gateway.send_calls, 0)
 
@@ -173,38 +180,37 @@ class RuntimeTests(unittest.TestCase):
         changed = intent("same", lot=0.02).canonical_payload()
         with self.assertRaises(StoreError):
             self.store.reserve_intent("same", changed)
-        count = self.store.conn.execute(
-            "SELECT COUNT(*) FROM audit_events WHERE event_type='INTENT_IDEMPOTENCY_COLLISION'"
-        ).fetchone()[0]
+        count = self.store.conn.execute("SELECT COUNT(*) FROM audit_events WHERE event_type='INTENT_IDEMPOTENCY_COLLISION'").fetchone()[0]
         self.assertEqual(count, 1)
         self.assertTrue(self.store.verify_chain())
 
     def test_second_preflight_exposure_change_prevents_send(self):
         self.gateway.block_on_second = True
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
-        result = engine.submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent())
         self.assertEqual(result["state"], "ABANDONED_BEFORE_SEND")
         self.assertEqual(self.gateway.send_calls, 0)
 
+    def test_frozen_geometry_is_rematerialized_on_preflight(self):
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=False).submit(intent("geom"))
+        self.assertAlmostEqual(result["geometry"]["stop_price"], 2999.2)
+        self.assertAlmostEqual(result["geometry"]["take_profit_price"], 3002.2)
+
     def test_successful_send_is_reconciled(self):
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
-        result = engine.submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent())
         self.assertEqual(result["state"], "ACKNOWLEDGED")
         self.assertEqual(self.gateway.send_calls, 1)
         self.assertTrue(result["post_send"]["ok"])
 
     def test_post_send_exposure_count_violation_forces_manual_review(self):
         self.gateway.post_send_exposure = ExposureSnapshot(2, 0, 0.02, 0.0)
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
-        result = engine.submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent())
         self.assertEqual(self.gateway.send_calls, 1)
         self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
         self.assertEqual(result["reason"], "POST_SEND_EXPOSURE_COUNT_MISMATCH")
 
     def test_post_send_volume_violation_forces_manual_review(self):
         self.gateway.post_send_exposure = ExposureSnapshot(1, 0, 0.03, 0.0)
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
-        result = engine.submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent())
         self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
         self.assertEqual(result["reason"], "POST_SEND_MAX_EXPOSURE_BREACH")
 
@@ -215,8 +221,7 @@ class RuntimeTests(unittest.TestCase):
                     raise RuntimeError("RECONCILIATION_UNAVAILABLE")
                 return BrokerMatch(False)
         gw = ReconcileFailGateway()
-        engine = ExecutionEngine(self.store, gw, execution_enabled=True)
-        result = engine.submit(intent("reconfail"))
+        result = ExecutionEngine(self.store, gw, execution_enabled=True).submit(intent("reconfail"))
         self.assertEqual(gw.send_calls, 1)
         self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
 
@@ -226,8 +231,7 @@ class RuntimeTests(unittest.TestCase):
         self.store.transition("crash", "PREFLIGHT_OK")
         self.store.transition("crash", "SUBMITTING")
         self.gateway.recovery_match = BrokerMatch(False)
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
-        recovered = engine.recover_inflight()
+        recovered = ExecutionEngine(self.store, self.gateway, execution_enabled=True).recover_inflight()
         self.assertEqual(recovered[0]["state"], "MANUAL_REVIEW_NO_RESUBMIT")
         self.assertEqual(self.gateway.send_calls, 0)
 
@@ -238,8 +242,7 @@ class RuntimeTests(unittest.TestCase):
         self.store.transition("recover", "SUBMITTING")
         self.gateway.recovery_match = BrokerMatch(True, "POSITION", 123456, "OPEN")
         self.gateway.post_send_exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
-        recovered = engine.recover_inflight()
+        recovered = ExecutionEngine(self.store, self.gateway, execution_enabled=True).recover_inflight()
         self.assertEqual(recovered[0]["state"], "ACKNOWLEDGED")
         self.assertEqual(self.gateway.send_calls, 0)
 
