@@ -3,21 +3,27 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from r7_runtime.audit_store import AuditStore, StoreError
 from r7_runtime.constants import R6_EXECUTION_AUTHORITY
 from r7_runtime.execution import ExecutionEngine
-from r7_runtime.models import AccountSnapshot, BrokerMatch, ExposureSnapshot, OrderIntent, SymbolSnapshot
+from r7_runtime.models import AccountSnapshot, BrokerMatch, ExposureSnapshot, OrderIntent, OwnedPositionSnapshot, SymbolSnapshot
 
 
 class FakeResult:
     order = 123456
     deal = 0
+    retcode = 10009
+    volume = 0.01
+    price = 3000.2
 
 
 class FakeGateway:
     def __init__(self):
         self.loss = 5.0
+        self.actual_stop_loss = 5.0
+        self.remaining_stop_loss = 5.0
         self.equity = 1000.0
         self.exposure = ExposureSnapshot(0, 0, 0.0, 0.0)
         self.post_send_exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
@@ -28,6 +34,12 @@ class FakeGateway:
         self.send_calls = 0
         self.preflight_calls = 0
         self.block_on_second = False
+        self.owned_position_snapshot = OwnedPositionSnapshot(
+            123456, "XAUUSD.i", "BUY", 0.01, 3000.2, 2999.2, 3002.2, 1607101, "R7R1:r6_test"
+        )
+        self.owned_pending_orders = []
+        self.containment_calls = 0
+        self.containment_should_fail = False
 
     def account_snapshot(self):
         return AccountSnapshot(1, "BlueberryMarkets-Demo", "SGD", self.equity, self.equity, self.equity)
@@ -76,6 +88,38 @@ class FakeGateway:
             return self.match_after_send
         return self.match_before_send
 
+    def owned_orders(self, intent_id):
+        return list(self.owned_pending_orders)
+
+    def owned_position(self, intent_id):
+        has_position_match = (
+            (self.recovery_match is not None and self.recovery_match.found and self.recovery_match.kind == "POSITION")
+            or (self.send_calls > 0 and self.match_after_send.kind == "POSITION")
+            or (self.match_before_send.found and self.match_before_send.kind == "POSITION")
+        )
+        return self.owned_position_snapshot if has_position_match else None
+
+    def position_stop_loss_sgd(self, position):
+        return self.actual_stop_loss
+
+    def position_remaining_stop_loss_sgd(self, position):
+        return self.remaining_stop_loss
+
+    def emergency_flatten_owned_intent(self, intent_id):
+        self.containment_calls += 1
+        if self.containment_should_fail:
+            raise RuntimeError("CONTAINMENT_FAILED")
+        self.owned_pending_orders = []
+        self.owned_position_snapshot = None
+        self.post_send_exposure = ExposureSnapshot(0, 0, 0.0, 0.0)
+        return {
+            "ok": True,
+            "cancelled_orders": [],
+            "close_attempted_positions": [123456],
+            "remaining_owned_positions": [],
+            "remaining_owned_orders": [],
+        }
+
 
 def intent(intent_id="abc", loss_source="TIME_LANE", lot=0.01, *, authorized=True):
     if authorized:
@@ -101,15 +145,13 @@ class RuntimeTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_raw_intent_cannot_send_even_when_execution_enabled(self):
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=True)
-        result = engine.submit(intent("raw", authorized=False))
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("raw", authorized=False))
         self.assertEqual(result["state"], "BLOCKED")
         self.assertEqual(result["reason"], "FROZEN_R6_EXECUTION_AUTHORITY_REQUIRED")
         self.assertEqual(self.gateway.send_calls, 0)
 
     def test_dry_run_raw_intent_is_diagnostic_only_and_never_sends(self):
-        engine = ExecutionEngine(self.store, self.gateway, execution_enabled=False)
-        result = engine.submit(intent("dryraw", authorized=False))
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=False).submit(intent("dryraw", authorized=False))
         self.assertEqual(result["state"], "DRY_RUN_COMPLETE")
         self.assertEqual(self.gateway.send_calls, 0)
 
@@ -162,7 +204,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(second["duplicate_suppressed"])
         self.assertEqual(self.gateway.send_calls, 0)
 
-    def test_broker_side_duplicate_is_acknowledged_without_send(self):
+    def test_broker_side_historical_duplicate_is_acknowledged_without_send(self):
         self.gateway.match_before_send = BrokerMatch(True, "DEAL", 991, "HISTORICAL")
         self.gateway.post_send_exposure = ExposureSnapshot(0, 0, 0.0, 0.0)
         result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("brokerdup"))
@@ -195,24 +237,92 @@ class RuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(result["geometry"]["stop_price"], 2999.2)
         self.assertAlmostEqual(result["geometry"]["take_profit_price"], 3002.2)
 
-    def test_successful_send_is_reconciled(self):
+    def test_successful_send_requires_safe_actual_fill(self):
         result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent())
         self.assertEqual(result["state"], "ACKNOWLEDGED")
         self.assertEqual(self.gateway.send_calls, 1)
+        self.assertEqual(self.gateway.containment_calls, 0)
         self.assertTrue(result["post_send"]["ok"])
+        self.assertTrue(result["actual_fill_safety"]["ok"])
+        self.assertEqual(result["actual_fill_safety"]["risk_basis"], "PRE_SEND_EQUITY_ACTUAL_FILL_TO_STOP")
 
-    def test_post_send_exposure_count_violation_forces_manual_review(self):
+    def test_actual_fill_operating_risk_breach_is_contained(self):
+        self.gateway.actual_stop_loss = 5.5001
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("fillrisk"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "ACTUAL_FILL_UNSAFE:OPERATING_RISK_CAP_BREACH")
+        self.assertEqual(self.gateway.containment_calls, 1)
+        self.assertTrue(result["containment"]["ok"])
+
+    def test_partial_fill_volume_mismatch_is_contained(self):
+        self.gateway.post_send_exposure = ExposureSnapshot(1, 0, 0.005, 0.0)
+        self.gateway.owned_position_snapshot = OwnedPositionSnapshot(
+            123456, "XAUUSD.i", "BUY", 0.005, 3000.2, 2999.2, 3002.2, 1607101, "R7R1:r6_partial"
+        )
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("partial"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "ACTUAL_FILL_UNSAFE:ACTUAL_FILL_VOLUME_MISMATCH")
+        self.assertEqual(self.gateway.containment_calls, 1)
+
+    def test_pending_fill_remainder_is_contained(self):
+        self.gateway.post_send_exposure = ExposureSnapshot(1, 1, 0.01, 0.01)
+        self.gateway.owned_pending_orders = [SimpleNamespace(ticket=8001)]
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("remainder"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "POST_SEND_EXPOSURE_COUNT_MISMATCH")
+        self.assertEqual(self.gateway.containment_calls, 1)
+
+    def test_market_request_left_pending_is_cancelled_not_acknowledged(self):
+        self.gateway.match_after_send = BrokerMatch(True, "ORDER", 8002, "PENDING")
+        self.gateway.post_send_exposure = ExposureSnapshot(0, 1, 0.0, 0.01)
+        self.gateway.owned_position_snapshot = None
+        self.gateway.owned_pending_orders = [SimpleNamespace(ticket=8002)]
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("pending"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "POST_SEND_PENDING_ORDER_NOT_SAFE_TO_ACK")
+        self.assertEqual(self.gateway.containment_calls, 1)
+
+    def test_missing_stop_is_contained(self):
+        self.gateway.owned_position_snapshot = OwnedPositionSnapshot(
+            123456, "XAUUSD.i", "BUY", 0.01, 3000.2, 0.0, 3002.2, 1607101, "R7R1:r6_nosl"
+        )
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("nosl"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "ACTUAL_FILL_UNSAFE:ACTUAL_POSITION_STOP_MISSING")
+        self.assertEqual(self.gateway.containment_calls, 1)
+
+    def test_missing_target_is_contained(self):
+        self.gateway.owned_position_snapshot = OwnedPositionSnapshot(
+            123456, "XAUUSD.i", "BUY", 0.01, 3000.2, 2999.2, 0.0, 1607101, "R7R1:r6_notp"
+        )
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("notp"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(result["reason"], "ACTUAL_FILL_UNSAFE:ACTUAL_POSITION_TARGET_MISSING")
+        self.assertEqual(self.gateway.containment_calls, 1)
+
+    def test_containment_failure_still_forces_manual_review(self):
+        self.gateway.actual_stop_loss = 6.1
+        self.gateway.containment_should_fail = True
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("containfail"))
+        self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(self.gateway.containment_calls, 1)
+        self.assertFalse(result["containment"]["ok"])
+        self.assertIn("CONTAINMENT_FAILED", result["containment"]["error"])
+
+    def test_post_send_exposure_count_violation_forces_containment(self):
         self.gateway.post_send_exposure = ExposureSnapshot(2, 0, 0.02, 0.0)
-        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("twopos"))
         self.assertEqual(self.gateway.send_calls, 1)
         self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
         self.assertEqual(result["reason"], "POST_SEND_EXPOSURE_COUNT_MISMATCH")
+        self.assertEqual(self.gateway.containment_calls, 1)
 
-    def test_post_send_volume_violation_forces_manual_review(self):
+    def test_post_send_volume_violation_forces_containment(self):
         self.gateway.post_send_exposure = ExposureSnapshot(1, 0, 0.03, 0.0)
-        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent())
+        result = ExecutionEngine(self.store, self.gateway, execution_enabled=True).submit(intent("overvol"))
         self.assertEqual(result["state"], "MANUAL_REVIEW_NO_RESUBMIT")
         self.assertEqual(result["reason"], "POST_SEND_MAX_EXPOSURE_BREACH")
+        self.assertEqual(self.gateway.containment_calls, 1)
 
     def test_post_send_reconciliation_failure_never_resubmits(self):
         class ReconcileFailGateway(FakeGateway):
@@ -235,7 +345,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(recovered[0]["state"], "MANUAL_REVIEW_NO_RESUBMIT")
         self.assertEqual(self.gateway.send_calls, 0)
 
-    def test_restart_reconciles_existing_broker_position_without_resend(self):
+    def test_restart_reconciles_safe_existing_position_without_resend(self):
         payload = intent("recover").canonical_payload()
         self.store.reserve_intent("recover", payload)
         self.store.transition("recover", "PREFLIGHT_OK")
@@ -244,7 +354,23 @@ class RuntimeTests(unittest.TestCase):
         self.gateway.post_send_exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
         recovered = ExecutionEngine(self.store, self.gateway, execution_enabled=True).recover_inflight()
         self.assertEqual(recovered[0]["state"], "ACKNOWLEDGED")
+        self.assertEqual(recovered[0]["actual_fill_safety"]["risk_basis"], "CURRENT_EQUITY_REMAINING_TO_STOP")
         self.assertEqual(self.gateway.send_calls, 0)
+        self.assertEqual(self.gateway.containment_calls, 0)
+
+    def test_restart_unsafe_remaining_risk_is_contained_without_resend(self):
+        payload = intent("recoverbad").canonical_payload()
+        self.store.reserve_intent("recoverbad", payload)
+        self.store.transition("recoverbad", "PREFLIGHT_OK")
+        self.store.transition("recoverbad", "SUBMITTING")
+        self.gateway.recovery_match = BrokerMatch(True, "POSITION", 123456, "OPEN")
+        self.gateway.post_send_exposure = ExposureSnapshot(1, 0, 0.01, 0.0)
+        self.gateway.remaining_stop_loss = 5.5001
+        recovered = ExecutionEngine(self.store, self.gateway, execution_enabled=True).recover_inflight()
+        self.assertEqual(recovered[0]["state"], "MANUAL_REVIEW_NO_RESUBMIT")
+        self.assertEqual(recovered[0]["reason"], "ACTUAL_FILL_UNSAFE:OPERATING_RISK_CAP_BREACH")
+        self.assertEqual(self.gateway.send_calls, 0)
+        self.assertEqual(self.gateway.containment_calls, 1)
 
     def test_audit_chain_verifies(self):
         self.store.append_event("A", {"x": 1})
