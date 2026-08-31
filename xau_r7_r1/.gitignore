@@ -1,0 +1,22 @@
+# Canonical/fused binary packages: keep out of the public repository.
+XAU_BOUNDED_RECOVERY_V16_PROFIT_TRANSFER_R6_RESEARCH_FROZEN.zip
+XAU_BOUNDED_RECOVERY_V16_R7_R1_FULL_RUNTIME_REPAIR.zip
+XAU_BOUNDED_RECOVERY_V16_R7_R1_FULL_RUNTIME_REPAIR.zip.sha256
+
+# Exact frozen strategy source extracted locally from the canonical R6 archive.
+R7_R1_R6_PRODUCER_SOURCE/
+
+# Producer parity/admission evidence generated locally from exact source/fixtures.
+R7_R1_R6_SOURCE_PROBE.json
+R7_R1_R6_REFERENCE_STREAM.jsonl
+R7_R1_R6_PRODUCER_STREAM.jsonl
+R7_R1_R6_PARITY_ISOLATION.json
+R7_R1_R6_PRODUCER_PARITY.json
+
+# Mutable runtime/broker evidence must never be committed.
+r7_runtime_state/
+r7_r6_bridge/
+
+# Python build residue.
+__pycache__/
+*.pyc
