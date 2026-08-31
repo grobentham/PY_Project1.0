@@ -6,7 +6,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .constants import TERMINAL_INTENT_STATES
 
@@ -101,6 +101,7 @@ class AuditStore:
         body = self._canon(payload)
         payload_hash = self._payload_hash(body)
         now = time.time()
+        collision = False
         with self.immediate():
             row = self.conn.execute(
                 "SELECT payload_hash FROM order_intents WHERE client_intent_id=?",
@@ -108,15 +109,31 @@ class AuditStore:
             ).fetchone()
             if row is not None:
                 if row[0] != payload_hash:
-                    self._append_locked("INTENT_IDEMPOTENCY_COLLISION", {"client_intent_id": client_intent_id})
-                    raise StoreError("IDEMPOTENCY_COLLISION")
-                return False
-            self.conn.execute(
-                "INSERT INTO order_intents(client_intent_id,payload_json,payload_hash,state,created_utc,updated_utc) VALUES(?,?,?,?,?,?)",
-                (client_intent_id, body, payload_hash, "RESERVED", now, now),
-            )
-            self._append_locked("INTENT_RESERVED", {"client_intent_id": client_intent_id, "payload_hash": payload_hash})
-            return True
+                    # Commit the collision event first, then raise outside this
+                    # transaction so the evidence is not rolled back with the error.
+                    self._append_locked(
+                        "INTENT_IDEMPOTENCY_COLLISION",
+                        {
+                            "client_intent_id": client_intent_id,
+                            "existing_payload_hash": row[0],
+                            "attempted_payload_hash": payload_hash,
+                        },
+                    )
+                    collision = True
+                else:
+                    return False
+            else:
+                self.conn.execute(
+                    "INSERT INTO order_intents(client_intent_id,payload_json,payload_hash,state,created_utc,updated_utc) VALUES(?,?,?,?,?,?)",
+                    (client_intent_id, body, payload_hash, "RESERVED", now, now),
+                )
+                self._append_locked(
+                    "INTENT_RESERVED",
+                    {"client_intent_id": client_intent_id, "payload_hash": payload_hash},
+                )
+        if collision:
+            raise StoreError("IDEMPOTENCY_COLLISION")
+        return True
 
     def get_intent(self, client_intent_id: str) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
