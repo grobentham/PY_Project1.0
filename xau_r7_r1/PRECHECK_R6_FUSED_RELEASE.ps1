@@ -98,12 +98,14 @@ try {
 
     if (!(Test-Path -LiteralPath $Output -PathType Leaf)) { Fail 'fused-release precheck report was not generated' }
     $report = Get-Content -LiteralPath $Output -Raw | ConvertFrom-Json
-    if ($report.precheck_version -ne 'R7_R1_R6_FUSED_RELEASE_PRECHECK_V1') { Fail 'unexpected precheck version' }
+    if ($report.precheck_version -ne 'R7_R1_R6_FUSED_RELEASE_PRECHECK_V2') { Fail 'unexpected precheck version' }
     if ($report.baseline_package_integrity -ne 'PASS') { Fail 'baseline package integrity did not pass' }
     if ($report.baseline_causal_r6_producer_ready -ne $false) { Fail 'baseline producer lock is not false' }
     if ($report.baseline_execution_hard_locked -ne $true) { Fail 'baseline execution is not hard-locked' }
     if ($report.fresh_seal_matches_supplied_seal -ne $true) { Fail 'fresh seal does not match supplied seal' }
     if ($report.candidate_admission_ready -ne $true) { Fail 'candidate admission is not ready' }
+    if ($report.trusted_producer_replay_pass -ne $true) { Fail 'trusted producer replay did not pass' }
+    if ($report.producer_source_policy_pass -ne $true) { Fail 'producer source policy did not pass' }
     if ($report.eligible_for_future_fused_build -ne $true) { Fail 'candidate is not eligible for future fused build' }
     if ($report.fused_package_created -ne $false) { Fail 'precheck may not create a fused package' }
     if ($report.readiness_switch_changed -ne $false) { Fail 'precheck may not change readiness switch' }
@@ -113,7 +115,7 @@ try {
     if ($report.successor_release_required -ne $true) { Fail 'precheck must require a separate successor release' }
 
     Write-Host ''
-    Write-Host '[PASS] Sealed R6 producer candidate is eligible for a separate future fused-build step.' -ForegroundColor Green
+    Write-Host '[PASS] Sealed R6 producer candidate passed fresh trusted replay and is eligible for a separate future fused-build step.' -ForegroundColor Green
     Write-Host ('Precheck: ' + $Output)
     Write-Host 'No code was integrated, no readiness switch was changed, and execution remains locked.' -ForegroundColor Yellow
 }
