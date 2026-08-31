@@ -20,17 +20,9 @@ $ProtectedSuffixes = @(
     'V16_R6_FINAL_HOLDOUT_PREREGISTRATION.json'
 )
 
-function Fail([string]$Message) {
-    throw ('R7-R1 BUILD BLOCKED: ' + $Message)
-}
-
-function Write-Utf8NoBom([string]$Path, [string]$Text) {
-    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
-}
-
-function Get-Rel([string]$Base, [string]$Path) {
-    return $Path.Substring($Base.Length).TrimStart([char]'\',[char]'/').Replace('\','/')
-}
+function Fail([string]$Message) { throw ('R7-R1 BUILD BLOCKED: ' + $Message) }
+function Write-Utf8NoBom([string]$Path, [string]$Text) { [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false))) }
+function Get-Rel([string]$Base, [string]$Path) { return $Path.Substring($Base.Length).TrimStart([char]'\',[char]'/').Replace('\','/') }
 
 function Get-TreeHashes([string]$Root) {
     $map = [ordered]@{}
@@ -45,12 +37,8 @@ function Get-ProtectedHashes([string]$Root) {
     $map = [ordered]@{}
     $all = Get-ChildItem -LiteralPath $Root -Recurse -File
     foreach ($suffix in $ProtectedSuffixes) {
-        $matches = @($all | Where-Object {
-            (Get-Rel $Root $_.FullName).EndsWith($suffix, [System.StringComparison]::OrdinalIgnoreCase)
-        })
-        if ($matches.Count -ne 1) {
-            Fail ("protected path resolution failed for {0}: matches={1}" -f $suffix, $matches.Count)
-        }
+        $matches = @($all | Where-Object { (Get-Rel $Root $_.FullName).EndsWith($suffix, [System.StringComparison]::OrdinalIgnoreCase) })
+        if ($matches.Count -ne 1) { Fail ("protected path resolution failed for {0}: matches={1}" -f $suffix, $matches.Count) }
         $rel = Get-Rel $Root $matches[0].FullName
         $map[$rel] = (Get-FileHash -LiteralPath $matches[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     }
@@ -72,14 +60,10 @@ function Get-R7RuntimeCodeHashes([string]$Root) {
 
 function Get-MapEntries($Expected) {
     if ($Expected -is [System.Collections.IDictionary]) {
-        return @($Expected.GetEnumerator() | ForEach-Object {
-            [pscustomobject]@{ Key = [string]$_.Key; Value = [string]$_.Value }
-        })
+        return @($Expected.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Key = [string]$_.Key; Value = [string]$_.Value } })
     }
     if ($null -ne $Expected -and $null -ne $Expected.PSObject) {
-        return @($Expected.PSObject.Properties | ForEach-Object {
-            [pscustomobject]@{ Key = [string]$_.Name; Value = [string]$_.Value }
-        })
+        return @($Expected.PSObject.Properties | ForEach-Object { [pscustomobject]@{ Key = [string]$_.Name; Value = [string]$_.Value } })
     }
     Fail 'expected hash map is neither IDictionary nor PSCustomObject'
 }
@@ -99,13 +83,9 @@ function Verify-InheritedTree([string]$Root, $Expected) {
         $rel = [string]$entry.Key
         if ($rel -ieq 'START_XAU.bat') { continue }
         $path = Join-Path $Root ($rel.Replace('/','\'))
-        if (!(Test-Path -LiteralPath $path -PathType Leaf)) {
-            Fail ('inherited parent file missing: ' + $rel)
-        }
+        if (!(Test-Path -LiteralPath $path -PathType Leaf)) { Fail ('inherited parent file missing: ' + $rel) }
         $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actual -ne [string]$entry.Value) {
-            Fail ('inherited parent file changed: ' + $rel)
-        }
+        if ($actual -ne [string]$entry.Value) { Fail ('inherited parent file changed: ' + $rel) }
     }
 }
 
@@ -124,9 +104,7 @@ function Invoke-Python($Python, [string[]]$Arguments) {
 function Invoke-PythonCapture($Python, [string[]]$Arguments) {
     $allArgs = @(); $allArgs += @($Python.Prefix); $allArgs += @($Arguments)
     $output = & $Python.Exe @allArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Fail ('Python command failed: ' + ($Arguments -join ' ') + "`n" + ($output -join "`n"))
-    }
+    if ($LASTEXITCODE -ne 0) { Fail ('Python command failed: ' + ($Arguments -join ' ') + "`n" + ($output -join "`n")) }
     return @($output)
 }
 
@@ -138,9 +116,7 @@ function Assert-PythonVersion($Python) {
 
 if (!(Test-Path -LiteralPath $ParentZip -PathType Leaf)) { Fail ("put {0} beside BUILD_R7_R1.ps1" -f $CanonicalName) }
 $parentHash = (Get-FileHash -LiteralPath $ParentZip -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($parentHash -ne $CanonicalSha256) {
-    Fail ("canonical R6 SHA-256 mismatch. expected={0} actual={1}" -f $CanonicalSha256, $parentHash)
-}
+if ($parentHash -ne $CanonicalSha256) { Fail ("canonical R6 SHA-256 mismatch. expected={0} actual={1}" -f $CanonicalSha256, $parentHash) }
 
 $Python = Find-Python
 Assert-PythonVersion $Python
@@ -170,9 +146,7 @@ try {
     Verify-InheritedTree $Extract $parentTree
     $protectedAfter = Get-ProtectedHashes $Extract
     foreach ($entry in (Get-MapEntries $protected)) {
-        if ([string]$protectedAfter[$entry.Key] -ne [string]$entry.Value) {
-            Fail ('protected R6 strategy/policy file changed: ' + [string]$entry.Key)
-        }
+        if ([string]$protectedAfter[$entry.Key] -ne [string]$entry.Value) { Fail ('protected R6 strategy/policy file changed: ' + [string]$entry.Key) }
     }
     $frozenLauncherHash = (Get-FileHash -LiteralPath (Join-Path $FrozenParent 'START_XAU_R6_ORIGINAL.bat.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($frozenLauncherHash -ne $originalLauncherHash) { Fail 'preserved R6 launcher bytes do not match original launcher hash' }
@@ -192,6 +166,7 @@ try {
         strategy_retuned = $false
         demo_only = $true
         execution_enabled_by_default = $false
+        causal_r6_producer_ready = $false
     }
     Write-Utf8NoBom (Join-Path $Extract 'R7_R1_PARENT_INTEGRITY.json') ($manifest | ConvertTo-Json -Depth 12)
 
@@ -214,6 +189,8 @@ try {
         python_compile_pass = $true
         unit_tests_pass = $true
         offline_runtime_integrity_pass = $true
+        causal_r6_producer_ready = $false
+        execution_runtime_hard_locked = $true
         offline_runtime_output = ($offline -join "`n")
         final_holdout_accessed = $false
         strategy_retuned = $false
@@ -231,6 +208,7 @@ try {
 
     Expand-Archive -LiteralPath $OutputZip -DestinationPath $Verify -Force
     $verifyManifest = Get-Content -LiteralPath (Join-Path $Verify 'R7_R1_PARENT_INTEGRITY.json') -Raw | ConvertFrom-Json
+    if ($verifyManifest.causal_r6_producer_ready -ne $false) { Fail 'extracted ZIP incorrectly claims causal R6 producer readiness' }
     Verify-InheritedTree $Verify $verifyManifest.parent_tree_sha256
     $verifyProtected = Get-ProtectedHashes $Verify
     foreach ($prop in $verifyManifest.protected_r6_hashes.PSObject.Properties) {
