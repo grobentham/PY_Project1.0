@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import tempfile
@@ -60,14 +59,21 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     runtime.load_config()
 
-    def test_demo_execution_needs_config_and_exact_environment_unlock(self):
+    def test_demo_execution_remains_locked_without_causal_producer(self):
         cfg = {"request_demo_execution": True}
-        with mock.patch.dict(os.environ, {}, clear=True):
+        env = {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "YES_I_ACCEPT_DEMO_ONLY"}
+        with mock.patch.dict(os.environ, env, clear=True):
             self.assertFalse(runtime.demo_execution_enabled(cfg))
-        with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "wrong"}, clear=True):
-            self.assertFalse(runtime.demo_execution_enabled(cfg))
-        with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "YES_I_ACCEPT_DEMO_ONLY"}, clear=True):
-            self.assertTrue(runtime.demo_execution_enabled(cfg))
+
+    def test_demo_execution_needs_producer_config_and_exact_environment_unlock(self):
+        cfg = {"request_demo_execution": True}
+        with mock.patch.object(runtime, "CAUSAL_R6_PRODUCER_READY", True):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertFalse(runtime.demo_execution_enabled(cfg))
+            with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "wrong"}, clear=True):
+                self.assertFalse(runtime.demo_execution_enabled(cfg))
+            with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "YES_I_ACCEPT_DEMO_ONLY"}, clear=True):
+                self.assertTrue(runtime.demo_execution_enabled(cfg))
 
 
 class PackageIntegrityTests(unittest.TestCase):
@@ -86,7 +92,6 @@ class PackageIntegrityTests(unittest.TestCase):
             p.write_text("PARENT:" + rel, encoding="utf-8")
         parent_hashes = {rel: sha256_file(root / rel) for rel in parent_paths}
         protected = {rel: parent_hashes[rel] for rel in parent_paths if rel != "START_XAU.bat"}
-
         original_launcher_hash = parent_hashes["START_XAU.bat"]
         (root / "START_XAU.bat").write_text("R7 LAUNCHER", encoding="utf-8")
         frozen = root / "r7_runtime" / "frozen_parent" / "START_XAU_R6_ORIGINAL.bat.txt"
