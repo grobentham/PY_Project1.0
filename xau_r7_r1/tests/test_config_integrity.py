@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from r7_runtime.constants import CANONICAL_R6_ZIP_SHA256
+from r7_runtime.r6_integrity import IntegrityError, sha256_file, verify_runtime_package_integrity
+from r7_runtime import runtime
+
+
+class ConfigTests(unittest.TestCase):
+    def write_config(self, root: Path, value) -> Path:
+        p = root / "config.json"
+        p.write_text(json.dumps(value), encoding="utf-8")
+        return p
+
+    def test_valid_restrictive_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self.write_config(Path(td), {
+                "max_tick_age_seconds": 2.0,
+                "max_spread_usd": 0.5,
+                "request_demo_execution": False,
+            })
+            with mock.patch.object(runtime, "CONFIG_PATH", p):
+                cfg = runtime.load_config()
+            self.assertEqual(cfg["max_tick_age_seconds"], 2.0)
+            self.assertEqual(cfg["max_spread_usd"], 0.5)
+            self.assertFalse(cfg["request_demo_execution"])
+
+    def test_config_cannot_weaken_tick_guard(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self.write_config(Path(td), {"max_tick_age_seconds": 5.01})
+            with mock.patch.object(runtime, "CONFIG_PATH", p):
+                with self.assertRaises(RuntimeError):
+                    runtime.load_config()
+
+    def test_config_cannot_weaken_spread_guard(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self.write_config(Path(td), {"max_spread_usd": 1.01})
+            with mock.patch.object(runtime, "CONFIG_PATH", p):
+                with self.assertRaises(RuntimeError):
+                    runtime.load_config()
+
+    def test_execution_request_must_be_boolean(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self.write_config(Path(td), {"request_demo_execution": "false"})
+            with mock.patch.object(runtime, "CONFIG_PATH", p):
+                with self.assertRaises(RuntimeError):
+                    runtime.load_config()
+
+    def test_unknown_config_key_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self.write_config(Path(td), {"disable_demo_only": True})
+            with mock.patch.object(runtime, "CONFIG_PATH", p):
+                with self.assertRaises(RuntimeError):
+                    runtime.load_config()
+
+    def test_demo_execution_needs_config_and_exact_environment_unlock(self):
+        cfg = {"request_demo_execution": True}
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(runtime.demo_execution_enabled(cfg))
+        with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "wrong"}, clear=True):
+            self.assertFalse(runtime.demo_execution_enabled(cfg))
+        with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "YES_I_ACCEPT_DEMO_ONLY"}, clear=True):
+            self.assertTrue(runtime.demo_execution_enabled(cfg))
+
+
+class PackageIntegrityTests(unittest.TestCase):
+    def build_fake_package(self, root: Path):
+        parent_paths = [
+            "v16r6/engine.py",
+            "v16r5/engine.py",
+            "V16_R5_MAIN.py",
+            "V16_R6_RESEARCH_DESIGN_LOCK.json",
+            "V16_R6_FINAL_HOLDOUT_PREREGISTRATION.json",
+            "START_XAU.bat",
+        ]
+        for rel in parent_paths:
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("PARENT:" + rel, encoding="utf-8")
+        parent_hashes = {rel: sha256_file(root / rel) for rel in parent_paths}
+        protected = {rel: parent_hashes[rel] for rel in parent_paths if rel != "START_XAU.bat"}
+
+        original_launcher_hash = parent_hashes["START_XAU.bat"]
+        (root / "START_XAU.bat").write_text("R7 LAUNCHER", encoding="utf-8")
+        frozen = root / "r7_runtime" / "frozen_parent" / "START_XAU_R6_ORIGINAL.bat.txt"
+        frozen.parent.mkdir(parents=True, exist_ok=True)
+        frozen.write_text("PARENT:START_XAU.bat", encoding="utf-8")
+        code = root / "r7_runtime" / "runtime.py"
+        code.write_text("VERSION='TEST'", encoding="utf-8")
+        r7_hashes = {
+            "r7_runtime/runtime.py": sha256_file(code),
+            "START_XAU.bat": sha256_file(root / "START_XAU.bat"),
+        }
+        manifest = {
+            "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
+            "build_verified_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
+            "parent_tree_sha256": parent_hashes,
+            "protected_r6_hashes": protected,
+            "r7_runtime_code_sha256": r7_hashes,
+            "original_start_xau_sha256": original_launcher_hash,
+            "final_holdout_accessed": False,
+            "strategy_retuned": False,
+            "demo_only": True,
+            "execution_enabled_by_default": False,
+        }
+        (root / "R7_R1_PARENT_INTEGRITY.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_full_runtime_package_integrity_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            result = verify_runtime_package_integrity(root)
+            self.assertEqual(result["protected_r6_files"], 5)
+            self.assertEqual(result["r7_runtime_code_files"], 2)
+
+    def test_protected_parent_tamper_is_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            (root / "v16r6" / "engine.py").write_text("tampered", encoding="utf-8")
+            with self.assertRaises(IntegrityError):
+                verify_runtime_package_integrity(root)
+
+    def test_r7_runtime_tamper_is_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            (root / "r7_runtime" / "runtime.py").write_text("tampered", encoding="utf-8")
+            with self.assertRaises(IntegrityError):
+                verify_runtime_package_integrity(root)
+
+    def test_frozen_original_launcher_tamper_is_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            frozen = root / "r7_runtime" / "frozen_parent" / "START_XAU_R6_ORIGINAL.bat.txt"
+            frozen.write_text("tampered", encoding="utf-8")
+            with self.assertRaises(IntegrityError):
+                verify_runtime_package_integrity(root)
+
+
+if __name__ == "__main__":
+    unittest.main()
