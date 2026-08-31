@@ -6,11 +6,10 @@ from dataclasses import asdict, replace
 from typing import Any, Dict, List
 
 from .audit_store import AuditStore
-from .constants import MAX_CANONICAL_LOT
+from .constants import MAX_CANONICAL_LOT, R6_EXECUTION_AUTHORITY
 from .models import BrokerMatch, OrderIntent
 from .r6_decision_adapter import round_price_to_point
 from .risk import RiskGovernor
-
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,20}$")
 _SOURCE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
@@ -58,8 +57,13 @@ class ExecutionEngine:
                 raise ExecutionError("INVALID_FROZEN_ATR_GEOMETRY")
             if not isinstance(intent.decision_fingerprint, str) or not _SHA256_RE.fullmatch(intent.decision_fingerprint):
                 raise ExecutionError("INVALID_DECISION_FINGERPRINT")
-        elif intent.decision_fingerprint is not None:
-            raise ExecutionError("FINGERPRINT_WITHOUT_FROZEN_GEOMETRY")
+            if intent.execution_authority != R6_EXECUTION_AUTHORITY:
+                raise ExecutionError("FROZEN_GEOMETRY_REQUIRES_R6_EXECUTION_AUTHORITY")
+        else:
+            if intent.decision_fingerprint is not None:
+                raise ExecutionError("FINGERPRINT_WITHOUT_FROZEN_GEOMETRY")
+            if intent.execution_authority is not None:
+                raise ExecutionError("EXECUTION_AUTHORITY_WITHOUT_FROZEN_GEOMETRY")
 
     @staticmethod
     def _materialize_frozen_geometry(intent: OrderIntent, symbol, entry: float) -> OrderIntent:
@@ -154,6 +158,14 @@ class ExecutionEngine:
 
     def submit(self, intent: OrderIntent) -> Dict[str, Any]:
         self.validate_intent_shape(intent)
+        if self.execution_enabled and intent.execution_authority != R6_EXECUTION_AUTHORITY:
+            self.store.append_event("EXECUTION_AUTHORITY_REJECTED", {
+                "client_intent_id": intent.client_intent_id,
+                "source": intent.source,
+                "execution_authority": intent.execution_authority,
+            })
+            return {"ok": False, "state": "BLOCKED", "reason": "FROZEN_R6_EXECUTION_AUTHORITY_REQUIRED"}
+
         payload = intent.canonical_payload()
         created = self.store.reserve_intent(intent.client_intent_id, payload)
         if not created:
