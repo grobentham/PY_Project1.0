@@ -155,6 +155,8 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
             raise ProducerReplayError("PRODUCER_ASYNC_OR_GENERATOR_FORBIDDEN")
         if isinstance(node, ast.While):
             raise ProducerReplayError("PRODUCER_UNBOUNDED_WHILE_FORBIDDEN")
+        if isinstance(node, ast.Try) or node.__class__.__name__ == "TryStar":
+            raise ProducerReplayError("PRODUCER_EXCEPTION_HANDLING_FORBIDDEN")
         if isinstance(node, (ast.ClassDef, ast.Global, ast.Nonlocal)):
             raise ProducerReplayError("PRODUCER_STATEFUL_CONSTRUCT_FORBIDDEN:" + node.__class__.__name__)
         if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
@@ -177,6 +179,7 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
         "imports_allowed": False,
         "classes_allowed": False,
         "while_loops_allowed": False,
+        "exception_handling_allowed": False,
         "function_decorators_allowed": False,
         "function_annotations_allowed": False,
         "mutable_top_level_state_allowed": False,
@@ -380,6 +383,7 @@ def _replay_producer_inprocess(fixture_path: Path, producer_module_path: Path) -
         "imports_allowed": False,
         "classes_allowed": False,
         "while_loops_allowed": False,
+        "exception_handling_allowed": False,
         "function_decorators_allowed": False,
         "function_annotations_allowed": False,
         "mutable_top_level_state_allowed": False,
@@ -416,7 +420,6 @@ def replay_producer(fixture_path: Path, producer_module_path: Path) -> Tuple[byt
     fixture_path = Path(fixture_path).resolve()
     producer_module_path = Path(producer_module_path).resolve()
 
-    # Validate and freeze identities in the parent before any untrusted candidate executes.
     fixtures = load_fixtures(fixture_path)
     source_policy = verify_producer_source_policy(producer_module_path)
     fixture_hash_before = sha256_file(fixture_path)
