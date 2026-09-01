@@ -41,6 +41,12 @@ def decision(source: str, i: int) -> Dict[str, object]:
     }
 
 
+def _canonical_jsonl(rows) -> str:
+    return "\n".join(
+        json.dumps(row, sort_keys=True, separators=(",", ":")) for row in rows
+    ) + "\n"
+
+
 def build_trusted_fixture(root: Path) -> Dict[str, Path]:
     root = Path(root)
     sources = {
@@ -132,10 +138,9 @@ def build_trusted_fixture(root: Path) -> Dict[str, Path]:
         encoding="utf-8",
     )
     reference_path = root / "R7_R1_R6_REFERENCE_STREAM.jsonl"
-    reference_path.write_text(
-        "\n".join(json.dumps(x, sort_keys=True) for x in reference_rows) + "\n",
-        encoding="utf-8",
-    )
+    # Write canonical bytes before any hash-bound parity/isolation evidence is built.
+    # This matches r6_reference_replay._canonicalize_stream_bytes exactly.
+    reference_path.write_text(_canonical_jsonl(reference_rows), encoding="utf-8")
 
     producer_stream_path = root / "R7_R1_R6_PRODUCER_STREAM.jsonl"
     replay_path = root / "R7_R1_R6_PRODUCER_REPLAY.json"
