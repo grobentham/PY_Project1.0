@@ -4,6 +4,9 @@ Set-StrictMode -Version Latest
 $CanonicalName = 'XAU_BOUNDED_RECOVERY_V16_PROFIT_TRANSFER_R6_RESEARCH_FROZEN.zip'
 $CanonicalSha256 = '8b54c6bc53c38c34b8e88d39893687e8ba75b063897c8b097aaedc68d614fca7'
 $OutputName = 'XAU_BOUNDED_RECOVERY_V16_R7_R1_FULL_RUNTIME_REPAIR.zip'
+$RequiredSourcePreflightVersion = 'R7_R1_CANONICAL_SOURCE_BUILD_PREFLIGHT_V2'
+$RequiredSourceBundleVersion = 'R7_R1_R6_SOURCE_BUNDLE_V4'
+$RequiredSourceProbeVersion = 'R7_R1_R6_SOURCE_PROBE_V2'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ParentZip = Join-Path $Here $CanonicalName
 $OutputZip = Join-Path $Here $OutputName
@@ -189,10 +192,16 @@ try {
         $sourcePreflightResult = (($sourcePreflightRaw -join "`n") | ConvertFrom-Json)
     }
     catch { Fail ('canonical source preflight returned invalid JSON: ' + $_.Exception.Message) }
+    if ([string]$sourcePreflightResult.preflight_version -ne $RequiredSourcePreflightVersion) { Fail 'canonical source preflight version mismatch' }
+    if ([string]$sourcePreflightResult.bundle_version -ne $RequiredSourceBundleVersion) { Fail 'canonical source bundle version mismatch' }
+    if ([string]$sourcePreflightResult.source_probe_version -ne $RequiredSourceProbeVersion) { Fail 'canonical source probe version mismatch' }
     if ([string]$sourcePreflightResult.canonical_parent_zip_sha256 -ne $CanonicalSha256) { Fail 'canonical source preflight parent SHA mismatch' }
     if ($sourcePreflightResult.source_only_bundle_verified -ne $true) { Fail 'canonical source preflight did not prove source-only extraction' }
     if ($sourcePreflightResult.dependency_closure_verified -ne $true) { Fail 'canonical source preflight did not prove dependency closure' }
     if ($sourcePreflightResult.required_engine_contract_verified -ne $true) { Fail 'canonical source preflight did not prove frozen engine contract' }
+    if ($sourcePreflightResult.prohibited_source_paths_blocked -ne $true) { Fail 'canonical source preflight did not prove prohibited source-path blocking' }
+    if ($sourcePreflightResult.owned_output_replacement_verified -ne $true) { Fail 'canonical source preflight did not prove owned-output-only replacement' }
+    if ([string]$sourcePreflightResult.ownership_marker_sha256 -notmatch '^[0-9a-fA-F]{64}$') { Fail 'canonical source preflight ownership marker hash invalid' }
     if ($sourcePreflightResult.strategy_executed -ne $false) { Fail 'canonical source preflight unexpectedly executed strategy logic' }
     if ($sourcePreflightResult.strategy_retuned -ne $false) { Fail 'canonical source preflight reports strategy retuning' }
     if ($sourcePreflightResult.final_holdout_accessed -ne $false) { Fail 'canonical source preflight reports Final Holdout access' }
@@ -237,6 +246,11 @@ try {
         r7_operator_tools_verified = $true
         original_launcher_preserved = $true
         canonical_source_preflight_pass = $true
+        canonical_source_preflight_version = [string]$sourcePreflightResult.preflight_version
+        canonical_source_bundle_version = [string]$sourcePreflightResult.bundle_version
+        canonical_source_probe_version = [string]$sourcePreflightResult.source_probe_version
+        source_prohibited_paths_blocked = $true
+        source_owned_output_replacement_verified = $true
         canonical_source_preflight = $sourcePreflightResult
         python_compile_pass = $true
         unit_tests_pass = $true
@@ -272,7 +286,16 @@ try {
     if ($verifyFrozenHash -ne [string]$verifyManifest.original_start_xau_sha256) { Fail 'extracted ZIP frozen launcher hash mismatch' }
     $verifyBuild = Get-Content -LiteralPath (Join-Path $Verify 'R7_R1_BUILD_VERIFICATION.json') -Raw | ConvertFrom-Json
     if ($verifyBuild.canonical_source_preflight_pass -ne $true) { Fail 'extracted ZIP lacks canonical source preflight PASS evidence' }
+    if ([string]$verifyBuild.canonical_source_preflight_version -ne $RequiredSourcePreflightVersion) { Fail 'extracted ZIP source preflight version mismatch' }
+    if ([string]$verifyBuild.canonical_source_bundle_version -ne $RequiredSourceBundleVersion) { Fail 'extracted ZIP source bundle version mismatch' }
+    if ([string]$verifyBuild.canonical_source_probe_version -ne $RequiredSourceProbeVersion) { Fail 'extracted ZIP source probe version mismatch' }
+    if ([string]$verifyBuild.canonical_source_preflight.preflight_version -ne $RequiredSourcePreflightVersion) { Fail 'extracted ZIP nested source preflight version mismatch' }
+    if ([string]$verifyBuild.canonical_source_preflight.bundle_version -ne $RequiredSourceBundleVersion) { Fail 'extracted ZIP nested source bundle version mismatch' }
+    if ([string]$verifyBuild.canonical_source_preflight.source_probe_version -ne $RequiredSourceProbeVersion) { Fail 'extracted ZIP nested source probe version mismatch' }
     if ([string]$verifyBuild.canonical_source_preflight.canonical_parent_zip_sha256 -ne $CanonicalSha256) { Fail 'extracted ZIP source preflight parent SHA mismatch' }
+    if ($verifyBuild.source_prohibited_paths_blocked -ne $true -or $verifyBuild.canonical_source_preflight.prohibited_source_paths_blocked -ne $true) { Fail 'extracted ZIP source preflight lacks prohibited-path blocking proof' }
+    if ($verifyBuild.source_owned_output_replacement_verified -ne $true -or $verifyBuild.canonical_source_preflight.owned_output_replacement_verified -ne $true) { Fail 'extracted ZIP source preflight lacks owned-output replacement proof' }
+    if ([string]$verifyBuild.canonical_source_preflight.ownership_marker_sha256 -notmatch '^[0-9a-fA-F]{64}$') { Fail 'extracted ZIP source preflight ownership marker hash invalid' }
     if ($verifyBuild.canonical_source_preflight.final_holdout_accessed -ne $false) { Fail 'extracted ZIP source preflight reports Final Holdout access' }
     if ($verifyBuild.canonical_source_preflight.strategy_retuned -ne $false) { Fail 'extracted ZIP source preflight reports strategy retuning' }
 
