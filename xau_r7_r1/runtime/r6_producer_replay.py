@@ -8,7 +8,9 @@ import hashlib
 import inspect
 import json
 import math
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,8 +21,8 @@ class ProducerReplayError(RuntimeError):
     pass
 
 
-REPLAY_VERSION = "R7_R1_R6_PRODUCER_REPLAY_V3"
-SOURCE_POLICY_VERSION = "R7_R1_R6_PRODUCER_SOURCE_POLICY_V3"
+REPLAY_VERSION = "R7_R1_R6_PRODUCER_REPLAY_V4"
+SOURCE_POLICY_VERSION = "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4"
 FIXTURE_SCHEMA = "V16_R6_CAUSAL_PRODUCER_FIXTURE_V1"
 PRODUCER_ENTRYPOINT = "produce"
 MAX_FIXTURE_FILE_BYTES = 64 * 1024 * 1024
@@ -30,6 +32,9 @@ MAX_INPUT_DEPTH = 64
 MAX_INPUT_NODES_PER_FIXTURE = 100_000
 MAX_RANGE_ITEMS = 1_000_000
 MAX_EXECUTION_LINE_EVENTS = 1_000_000
+MAX_REPLAY_WALL_SECONDS = 60.0
+MAX_REPLAY_STREAM_BYTES = 16 * 1024 * 1024
+MAX_REPLAY_REPORT_BYTES = 1024 * 1024
 
 # The candidate is deliberately import-free. Exact frozen behavior must be
 # expressed as a pure transformation of the supplied causal input. This keeps
@@ -65,15 +70,13 @@ _PROHIBITED_INPUT_KEY_TOKENS = (
 _REQUIRED_FIXTURE_FIELDS = frozenset({"schema", "fixture_id", "available_through_ms", "producer_input"})
 
 
-def _literal_only(node: ast.AST) -> bool:
+def _immutable_literal_only(node: ast.AST) -> bool:
     if isinstance(node, ast.Constant):
         return True
-    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-        return all(_literal_only(x) for x in node.elts)
-    if isinstance(node, ast.Dict):
-        return all((k is None or _literal_only(k)) and _literal_only(v) for k, v in zip(node.keys, node.values))
+    if isinstance(node, ast.Tuple):
+        return all(_immutable_literal_only(x) for x in node.elts)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-        return _literal_only(node.operand)
+        return _immutable_literal_only(node.operand)
     return False
 
 
@@ -85,6 +88,24 @@ def _safe_range(*args):
     if len(value) > MAX_RANGE_ITEMS:
         raise ProducerReplayError("PRODUCER_RANGE_LIMIT_EXCEEDED")
     return value
+
+
+def _function_definition_is_pure(node: ast.FunctionDef) -> None:
+    if node.decorator_list:
+        raise ProducerReplayError("PRODUCER_FUNCTION_DECORATOR_FORBIDDEN:" + node.name)
+    annotations = [node.returns]
+    annotations.extend(arg.annotation for arg in node.args.posonlyargs)
+    annotations.extend(arg.annotation for arg in node.args.args)
+    annotations.extend(arg.annotation for arg in node.args.kwonlyargs)
+    if node.args.vararg is not None:
+        annotations.append(node.args.vararg.annotation)
+    if node.args.kwarg is not None:
+        annotations.append(node.args.kwarg.annotation)
+    if any(annotation is not None for annotation in annotations):
+        raise ProducerReplayError("PRODUCER_FUNCTION_ANNOTATION_FORBIDDEN:" + node.name)
+    defaults = list(node.args.defaults) + [x for x in node.args.kw_defaults if x is not None]
+    if any(not _immutable_literal_only(default) for default in defaults):
+        raise ProducerReplayError("PRODUCER_FUNCTION_DEFAULT_NOT_IMMUTABLE_LITERAL:" + node.name)
 
 
 def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
@@ -105,15 +126,18 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
         if isinstance(top, (ast.Import, ast.ImportFrom)):
             raise ProducerReplayError("PRODUCER_IMPORT_FORBIDDEN")
         if isinstance(top, ast.FunctionDef):
+            _function_definition_is_pure(top)
             helper_functions.append(top.name)
             if top.name == PRODUCER_ENTRYPOINT:
                 produce_defs += 1
         elif isinstance(top, ast.Assign):
-            if not _literal_only(top.value):
-                raise ProducerReplayError("PRODUCER_TOP_LEVEL_NONLITERAL_ASSIGNMENT")
+            if not _immutable_literal_only(top.value):
+                raise ProducerReplayError("PRODUCER_TOP_LEVEL_MUTABLE_OR_NONLITERAL_ASSIGNMENT")
         elif isinstance(top, ast.AnnAssign):
-            if top.value is not None and not _literal_only(top.value):
-                raise ProducerReplayError("PRODUCER_TOP_LEVEL_NONLITERAL_ASSIGNMENT")
+            if top.annotation is not None:
+                raise ProducerReplayError("PRODUCER_TOP_LEVEL_ANNOTATION_FORBIDDEN")
+            if top.value is not None and not _immutable_literal_only(top.value):
+                raise ProducerReplayError("PRODUCER_TOP_LEVEL_MUTABLE_OR_NONLITERAL_ASSIGNMENT")
         elif isinstance(top, ast.Expr) and isinstance(top.value, ast.Constant) and isinstance(top.value.value, str):
             pass
         else:
@@ -125,15 +149,16 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             raise ProducerReplayError("PRODUCER_IMPORT_FORBIDDEN")
+        if isinstance(node, ast.FunctionDef):
+            _function_definition_is_pure(node)
         if isinstance(node, (ast.AsyncFunctionDef, ast.Await, ast.Yield, ast.YieldFrom)):
             raise ProducerReplayError("PRODUCER_ASYNC_OR_GENERATOR_FORBIDDEN")
         if isinstance(node, ast.While):
             raise ProducerReplayError("PRODUCER_UNBOUNDED_WHILE_FORBIDDEN")
         if isinstance(node, (ast.ClassDef, ast.Global, ast.Nonlocal)):
             raise ProducerReplayError("PRODUCER_STATEFUL_CONSTRUCT_FORBIDDEN:" + node.__class__.__name__)
-        if isinstance(node, ast.Attribute):
-            if node.attr.startswith("_"):
-                raise ProducerReplayError("PRODUCER_DUNDER_ATTRIBUTE_FORBIDDEN:" + node.attr)
+        if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
+            raise ProducerReplayError("PRODUCER_DUNDER_ATTRIBUTE_FORBIDDEN:" + node.attr)
         if isinstance(node, ast.Name) and node.id.startswith("__"):
             raise ProducerReplayError("PRODUCER_DUNDER_NAME_FORBIDDEN:" + node.id)
         if isinstance(node, ast.Call):
@@ -152,6 +177,10 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
         "imports_allowed": False,
         "classes_allowed": False,
         "while_loops_allowed": False,
+        "function_decorators_allowed": False,
+        "function_annotations_allowed": False,
+        "mutable_top_level_state_allowed": False,
+        "mutable_or_executable_defaults_allowed": False,
         "dunder_access_allowed": False,
         "filesystem_api_allowed": False,
         "network_api_allowed": False,
@@ -255,6 +284,8 @@ def _load_producer(path: Path):
     try:
         code = compile(source, str(path), "exec")
         exec(code, namespace, namespace)
+    except ProducerReplayError:
+        raise
     except Exception as exc:
         raise ProducerReplayError("PRODUCER_IMPORT_EXECUTION_FAILED:" + exc.__class__.__name__) from exc
     fn = namespace.get(PRODUCER_ENTRYPOINT)
@@ -292,7 +323,8 @@ def _canonical_stream_bytes(rows: List[Dict[str, Any]]) -> bytes:
     return text.encode("utf-8")
 
 
-def replay_producer(fixture_path: Path, producer_module_path: Path) -> Tuple[bytes, Dict[str, Any]]:
+def _replay_producer_inprocess(fixture_path: Path, producer_module_path: Path) -> Tuple[bytes, Dict[str, Any]]:
+    """Trusted worker implementation. Production callers use replay_producer(), which runs this in a child process."""
     fixture_path = Path(fixture_path).resolve()
     producer_module_path = Path(producer_module_path).resolve()
     fixtures = load_fixtures(fixture_path)
@@ -330,6 +362,8 @@ def replay_producer(fixture_path: Path, producer_module_path: Path) -> Tuple[byt
         })
 
     stream_bytes = _canonical_stream_bytes(output_rows)
+    if len(stream_bytes) > MAX_REPLAY_STREAM_BYTES:
+        raise ProducerReplayError("PRODUCER_STREAM_SIZE_LIMIT_EXCEEDED")
     stream_hash = hashlib.sha256(stream_bytes).hexdigest()
     report = {
         "replay_version": REPLAY_VERSION,
@@ -346,6 +380,10 @@ def replay_producer(fixture_path: Path, producer_module_path: Path) -> Tuple[byt
         "imports_allowed": False,
         "classes_allowed": False,
         "while_loops_allowed": False,
+        "function_decorators_allowed": False,
+        "function_annotations_allowed": False,
+        "mutable_top_level_state_allowed": False,
+        "mutable_or_executable_defaults_allowed": False,
         "dunder_access_allowed": False,
         "filesystem_api_allowed": False,
         "network_api_allowed": False,
@@ -362,6 +400,106 @@ def replay_producer(fixture_path: Path, producer_module_path: Path) -> Tuple[byt
         "final_holdout_accessed": False,
         "strategy_retuned": False,
     }
+    return stream_bytes, report
+
+
+def _worker_error(stderr: str, returncode: int) -> ProducerReplayError:
+    lines = [line.strip() for line in str(stderr or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        prefix = "PRODUCER_WORKER_REPLAY_ERROR:"
+        if line.startswith(prefix):
+            return ProducerReplayError(line[len(prefix):])
+    return ProducerReplayError("PRODUCER_REPLAY_WORKER_FAILED:exit=" + str(returncode))
+
+
+def replay_producer(fixture_path: Path, producer_module_path: Path) -> Tuple[bytes, Dict[str, Any]]:
+    fixture_path = Path(fixture_path).resolve()
+    producer_module_path = Path(producer_module_path).resolve()
+
+    # Validate and freeze identities in the parent before any untrusted candidate executes.
+    fixtures = load_fixtures(fixture_path)
+    source_policy = verify_producer_source_policy(producer_module_path)
+    fixture_hash_before = sha256_file(fixture_path)
+    producer_hash_before = sha256_file(producer_module_path)
+    worker_path = Path(__file__).with_name("r6_producer_worker.py").resolve()
+    if not worker_path.is_file():
+        raise ProducerReplayError("PRODUCER_REPLAY_WORKER_MISSING")
+    worker_hash_before = sha256_file(worker_path)
+    package_root = Path(__file__).resolve().parents[1]
+
+    with tempfile.TemporaryDirectory(prefix="xau_r7_r1_replay_") as td:
+        tmp = Path(td)
+        stream_path = tmp / "producer_stream.jsonl"
+        report_path = tmp / "producer_report.json"
+        command = [
+            sys.executable,
+            "-m",
+            "r7_runtime.r6_producer_worker",
+            "--fixtures",
+            str(fixture_path),
+            "--producer-module",
+            str(producer_module_path),
+            "--stream-output",
+            str(stream_path),
+            "--report-output",
+            str(report_path),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(package_root),
+                capture_output=True,
+                text=True,
+                timeout=MAX_REPLAY_WALL_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ProducerReplayError("PRODUCER_REPLAY_WALL_TIMEOUT") from exc
+        except Exception as exc:
+            raise ProducerReplayError("PRODUCER_REPLAY_WORKER_START_FAILED:" + exc.__class__.__name__) from exc
+        if completed.returncode != 0:
+            raise _worker_error(completed.stderr, completed.returncode)
+        if not stream_path.is_file() or not report_path.is_file():
+            raise ProducerReplayError("PRODUCER_REPLAY_WORKER_OUTPUT_MISSING")
+        if stream_path.stat().st_size <= 0 or stream_path.stat().st_size > MAX_REPLAY_STREAM_BYTES:
+            raise ProducerReplayError("PRODUCER_REPLAY_WORKER_STREAM_SIZE_INVALID")
+        if report_path.stat().st_size <= 0 or report_path.stat().st_size > MAX_REPLAY_REPORT_BYTES:
+            raise ProducerReplayError("PRODUCER_REPLAY_WORKER_REPORT_SIZE_INVALID")
+        stream_bytes = stream_path.read_bytes()
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ProducerReplayError("PRODUCER_REPLAY_WORKER_REPORT_INVALID") from exc
+
+    if sha256_file(fixture_path) != fixture_hash_before:
+        raise ProducerReplayError("FIXTURE_FILE_CHANGED_DURING_REPLAY")
+    if sha256_file(producer_module_path) != producer_hash_before:
+        raise ProducerReplayError("PRODUCER_SOURCE_CHANGED_DURING_REPLAY")
+    if sha256_file(worker_path) != worker_hash_before:
+        raise ProducerReplayError("PRODUCER_REPLAY_WORKER_CHANGED_DURING_REPLAY")
+    if not isinstance(report, dict):
+        raise ProducerReplayError("PRODUCER_REPLAY_WORKER_REPORT_INVALID")
+    if report.get("replay_version") != REPLAY_VERSION:
+        raise ProducerReplayError("PRODUCER_REPLAY_VERSION_MISMATCH")
+    if report.get("source_policy_version") != SOURCE_POLICY_VERSION:
+        raise ProducerReplayError("PRODUCER_SOURCE_POLICY_VERSION_MISMATCH")
+    if report.get("fixture_file_sha256") != fixture_hash_before:
+        raise ProducerReplayError("PRODUCER_REPLAY_FIXTURE_HASH_MISMATCH")
+    if report.get("producer_module_sha256") != producer_hash_before:
+        raise ProducerReplayError("PRODUCER_REPLAY_SOURCE_HASH_MISMATCH")
+    if report.get("fixture_count") != len(fixtures):
+        raise ProducerReplayError("PRODUCER_REPLAY_FIXTURE_COUNT_MISMATCH")
+    if report.get("source_policy_pass") is not True or source_policy.get("source_policy_pass") is not True:
+        raise ProducerReplayError("PRODUCER_SOURCE_POLICY_NOT_PASS")
+    if report.get("producer_stream_sha256") != hashlib.sha256(stream_bytes).hexdigest():
+        raise ProducerReplayError("PRODUCER_REPLAY_STREAM_HASH_MISMATCH")
+
+    report = dict(report)
+    report.update({
+        "process_isolation_enforced": True,
+        "worker_module_sha256": worker_hash_before,
+        "wall_timeout_seconds": MAX_REPLAY_WALL_SECONDS,
+    })
     return stream_bytes, report
 
 
@@ -388,7 +526,7 @@ def verify_replay_evidence(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replay an import-free resource-bounded pure R6 causal producer against causal fixture inputs")
+    parser = argparse.ArgumentParser(description="Replay an import-free resource-bounded R6 causal producer in an isolated timed worker process")
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--producer-module", type=Path, required=True)
     parser.add_argument("--producer-stream", type=Path, required=True)
