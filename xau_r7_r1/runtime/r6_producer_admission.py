@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import json
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .constants import CANONICAL_R6_ZIP_SHA256, RETIRED_SOURCE, R6_SOURCE_PRIORITY
 from .r6_integrity import sha256_file
 from .r6_producer_replay import ProducerReplayError, verify_replay_evidence
-from .r6_source_bundle import BUNDLE_VERSION, OWNERSHIP_MARKER_NAME
+from .r6_source_bundle import (
+    BUNDLE_VERSION,
+    MAX_DEPENDENCY_FILES,
+    MAX_SOURCE_FILE_BYTES,
+    MAX_TOTAL_SOURCE_BYTES,
+    OWNERSHIP_MARKER_NAME,
+    R6SourceBundleError,
+    _assert_allowed_source_path,
+    _decode_parse,
+    _local_import_dependencies,
+    _local_roots,
+)
 from .r6_source_probe import PROBE_VERSION
 
 
@@ -124,6 +135,103 @@ def _validate_source_relative(relative: str) -> str:
     return normalized
 
 
+def _safe_parent_python_paths(parent_tree: Dict[str, str]) -> Set[str]:
+    available: Set[str] = set()
+    for raw_relative in parent_tree:
+        relative = str(raw_relative).replace("\\", "/")
+        pure = PurePosixPath(relative)
+        if (
+            not relative
+            or pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in pure.parts)
+            or (pure.parts and ":" in pure.parts[0])
+        ):
+            raise ProducerAdmissionError("PARENT_TREE_PATH_INVALID:" + relative)
+        if relative.lower().endswith(".py"):
+            available.add(relative)
+    return available
+
+
+def _recompute_static_source_closure(root: Path, parent_tree: Dict[str, str]) -> Tuple[List[str], Dict[str, List[str]]]:
+    """Independently rebuild the archive-local Python import closure.
+
+    Source Bundle V4 evidence is candidate-supplied during sealing/admission, so
+    boolean claims such as `required_local_imports_resolved=true` cannot be the
+    authority. Recomputing against the canonical parent-tree Python path set
+    proves that no local helper was omitted and re-runs the same dynamic-import
+    detector used by the canonical extractor.
+    """
+    root = Path(root).resolve()
+    available_python = _safe_parent_python_paths(parent_tree)
+    missing = sorted(set(REQUIRED_SOURCE_FILES) - available_python)
+    if missing:
+        raise ProducerAdmissionError("SOURCE_BUNDLE_PARENT_REQUIRED_SOURCE_MISSING:" + ",".join(missing))
+    local_roots = _local_roots(available_python)
+    queue: List[str] = list(REQUIRED_SOURCE_FILES)
+    queued: Set[str] = set(queue)
+    dependency_order: List[str] = []
+    unresolved_by_file: Dict[str, List[str]] = {}
+    total_bytes = 0
+
+    try:
+        index = 0
+        while index < len(queue):
+            relative = queue[index]
+            index += 1
+            if len(queue) > MAX_DEPENDENCY_FILES:
+                raise R6SourceBundleError("R6_SOURCE_DEPENDENCY_COUNT_LIMIT_EXCEEDED")
+            _assert_allowed_source_path(relative)
+            raw_path = root / relative
+            if raw_path.is_symlink():
+                raise R6SourceBundleError("R6_SOURCE_DEPENDENCY_SYMLINK_FORBIDDEN:" + relative)
+            path = raw_path.resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as exc:
+                raise R6SourceBundleError("R6_SOURCE_OUTPUT_PATH_ESCAPE:" + relative) from exc
+            if not path.is_file():
+                raise R6SourceBundleError("R6_SOURCE_DEPENDENCY_MISSING:" + relative)
+            size = path.stat().st_size
+            if size < 0 or size > MAX_SOURCE_FILE_BYTES:
+                raise R6SourceBundleError("R6_ZIP_SOURCE_SIZE_INVALID:" + relative)
+            raw = path.read_bytes()
+            if len(raw) != size:
+                raise R6SourceBundleError("R6_ZIP_SOURCE_SIZE_MISMATCH:" + relative)
+            total_bytes += len(raw)
+            if total_bytes > MAX_TOTAL_SOURCE_BYTES:
+                raise R6SourceBundleError("R6_SOURCE_TOTAL_SIZE_LIMIT_EXCEEDED")
+            tree = _decode_parse(raw, relative)
+            dependency_order.append(relative)
+            local_deps, unresolved = _local_import_dependencies(relative, tree, available_python, local_roots)
+            if unresolved:
+                unresolved_by_file[relative] = sorted(unresolved)
+            for dep in sorted(local_deps):
+                _assert_allowed_source_path(dep)
+                if dep not in queued:
+                    queued.add(dep)
+                    queue.append(dep)
+    except R6SourceBundleError as exc:
+        raise ProducerAdmissionError("SOURCE_BUNDLE_STATIC_CLOSURE_RECOMPUTE_FAILED:" + str(exc)) from exc
+
+    return dependency_order, unresolved_by_file
+
+
+def _normalize_unresolved_imports(value: Any, verified_files: Set[str]) -> Dict[str, List[str]]:
+    if not isinstance(value, dict):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORTS_INVALID")
+    normalized_map: Dict[str, List[str]] = {}
+    for relative, imports in value.items():
+        normalized = _validate_source_relative(relative)
+        if normalized not in verified_files:
+            raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORT_SOURCE_UNKNOWN:" + normalized)
+        if not isinstance(imports, list) or any(not isinstance(x, str) or not x for x in imports):
+            raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORT_LIST_INVALID:" + normalized)
+        if imports != sorted(set(imports)):
+            raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORT_LIST_NOT_CANONICAL:" + normalized)
+        normalized_map[normalized] = list(imports)
+    return normalized_map
+
+
 def verify_source_bundle(
     root: Path,
     *,
@@ -185,6 +293,8 @@ def verify_source_bundle(
     if len(set(normalized_closure)) != len(normalized_closure):
         raise ProducerAdmissionError("SOURCE_BUNDLE_DUPLICATE_DEPENDENCY_PATH")
     normalized_files = {_validate_source_relative(k): v for k, v in files.items()}
+    if len(normalized_files) != len(files):
+        raise ProducerAdmissionError("SOURCE_BUNDLE_DUPLICATE_NORMALIZED_FILE_PATH")
     if dependency_count <= 0 or dependency_count != len(normalized_closure) or dependency_count != len(normalized_files):
         raise ProducerAdmissionError("SOURCE_BUNDLE_DEPENDENCY_COUNT_MISMATCH")
     if set(normalized_closure) != set(normalized_files):
@@ -196,6 +306,15 @@ def verify_source_bundle(
         raise ProducerAdmissionError("SOURCE_BUNDLE_REQUIRED_ENTRY_MISSING_FROM_CLOSURE")
 
     parent_tree = _normalized_hash_map(parent.get("parent_tree_sha256"), "PARENT_TREE_HASHES")
+    recomputed_closure, recomputed_unresolved = _recompute_static_source_closure(root, parent_tree)
+    if normalized_closure != recomputed_closure:
+        raise ProducerAdmissionError(
+            "SOURCE_BUNDLE_STATIC_CLOSURE_MISMATCH:claimed="
+            + ",".join(normalized_closure)
+            + ";recomputed="
+            + ",".join(recomputed_closure)
+        )
+
     verified_files: Dict[str, str] = {}
     for relative in normalized_closure:
         entry = normalized_files[relative]
@@ -203,7 +322,10 @@ def verify_source_bundle(
             raise ProducerAdmissionError("SOURCE_BUNDLE_FILE_ENTRY_INVALID:" + relative)
         digest = _validate_sha256_text(entry.get("sha256"), "SOURCE_BUNDLE_FILE_HASH_INVALID:" + relative)
         size = _strict_nonnegative_int(entry.get("size_bytes"), "SOURCE_BUNDLE_FILE_SIZE:" + relative)
-        actual = (root / relative).resolve()
+        raw_path = root / relative
+        if raw_path.is_symlink():
+            raise ProducerAdmissionError("SOURCE_BUNDLE_FILE_SYMLINK_FORBIDDEN:" + relative)
+        actual = raw_path.resolve()
         try:
             actual.relative_to(root)
         except ValueError as exc:
@@ -219,15 +341,9 @@ def verify_source_bundle(
             raise ProducerAdmissionError("SOURCE_BUNDLE_NOT_CANONICAL_PARENT_BYTES:" + relative)
         verified_files[relative] = digest
 
-    unresolved = bundle.get("unresolved_nonarchive_imports")
-    if not isinstance(unresolved, dict):
-        raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORTS_INVALID")
-    for relative, imports in unresolved.items():
-        normalized = _validate_source_relative(relative)
-        if normalized not in verified_files:
-            raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORT_SOURCE_UNKNOWN:" + normalized)
-        if not isinstance(imports, list) or any(not isinstance(x, str) or not x for x in imports):
-            raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORT_LIST_INVALID:" + normalized)
+    unresolved = _normalize_unresolved_imports(bundle.get("unresolved_nonarchive_imports"), set(verified_files))
+    if unresolved != recomputed_unresolved:
+        raise ProducerAdmissionError("SOURCE_BUNDLE_EXTERNAL_IMPORT_MAP_MISMATCH")
 
     return {
         "bundle_version": BUNDLE_VERSION,
@@ -235,6 +351,8 @@ def verify_source_bundle(
         "dependency_count": dependency_count,
         "verified_files": verified_files,
         "unresolved_nonarchive_imports": unresolved,
+        "static_dependency_closure_recomputed": True,
+        "dynamic_import_policy_recomputed": True,
         "prohibited_source_paths_blocked": True,
         "owned_output_replacement_only": True,
         "ownership_marker_file": OWNERSHIP_MARKER_NAME,
