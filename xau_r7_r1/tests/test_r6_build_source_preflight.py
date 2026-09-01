@@ -11,7 +11,7 @@ from r7_runtime.r6_build_source_preflight import (
     PREFLIGHT_VERSION,
     preflight_canonical_source,
 )
-from r7_runtime.r6_source_bundle import R6SourceBundleError
+from r7_runtime.r6_source_bundle import BUNDLE_VERSION, OWNERSHIP_MARKER_NAME, R6SourceBundleError
 
 
 R6_ENGINE = (
@@ -53,22 +53,28 @@ class CanonicalSourceBuildPreflightTests(unittest.TestCase):
     def digest(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
-    def test_preflight_exercises_source_closure_without_outcome_extraction(self):
+    def test_preflight_exercises_v4_source_closure_without_outcome_extraction(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             parent = self.make_parent(root)
             expected = self.digest(parent)
             out = root / "source_preflight"
-            result = preflight_canonical_source(
-                parent,
-                out,
-                expected_parent_sha256=expected,
-            )
+            result = preflight_canonical_source(parent, out, expected_parent_sha256=expected)
+            self.assertEqual(PREFLIGHT_VERSION, "R7_R1_CANONICAL_SOURCE_BUILD_PREFLIGHT_V2")
+            self.assertEqual(BUNDLE_VERSION, "R7_R1_R6_SOURCE_BUNDLE_V4")
             self.assertEqual(result["preflight_version"], PREFLIGHT_VERSION)
+            self.assertEqual(result["bundle_version"], BUNDLE_VERSION)
             self.assertEqual(result["canonical_parent_zip_sha256"], expected)
             self.assertTrue(result["source_only_bundle_verified"])
             self.assertTrue(result["dependency_closure_verified"])
             self.assertTrue(result["required_engine_contract_verified"])
+            self.assertTrue(result["prohibited_source_paths_blocked"])
+            self.assertTrue(result["owned_output_replacement_verified"])
+            self.assertEqual(len(result["ownership_marker_sha256"]), 64)
+            self.assertEqual(
+                result["ownership_marker_sha256"],
+                hashlib.sha256((out / OWNERSHIP_MARKER_NAME).read_bytes()).hexdigest(),
+            )
             self.assertGreaterEqual(result["dependency_count"], 4)
             self.assertGreaterEqual(result["unresolved_nonarchive_import_count"], 1)
             self.assertFalse(result["strategy_executed"])
@@ -90,12 +96,20 @@ class CanonicalSourceBuildPreflightTests(unittest.TestCase):
             parent = self.make_parent(root)
             out = root / "source_preflight"
             with self.assertRaisesRegex(R6SourceBundleError, "CANONICAL_R6_SHA256_MISMATCH"):
-                preflight_canonical_source(
-                    parent,
-                    out,
-                    expected_parent_sha256="0" * 64,
-                )
+                preflight_canonical_source(parent, out, expected_parent_sha256="0" * 64)
             self.assertFalse(out.exists())
+
+    def test_preexisting_unowned_preflight_directory_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            parent = self.make_parent(root)
+            out = root / "source_preflight"
+            out.mkdir()
+            important = out / "keep.txt"
+            important.write_text("keep", encoding="utf-8")
+            with self.assertRaisesRegex(R6SourceBundleError, "R6_SOURCE_BUNDLE_OUTPUT_NOT_OWNED"):
+                preflight_canonical_source(parent, out, expected_parent_sha256=self.digest(parent))
+            self.assertEqual(important.read_text(encoding="utf-8"), "keep")
 
 
 if __name__ == "__main__":
