@@ -8,8 +8,9 @@ import hashlib
 import inspect
 import json
 import math
+import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .r6_integrity import sha256_file
 
@@ -18,11 +19,17 @@ class ProducerReplayError(RuntimeError):
     pass
 
 
-REPLAY_VERSION = "R7_R1_R6_PRODUCER_REPLAY_V2"
-SOURCE_POLICY_VERSION = "R7_R1_R6_PRODUCER_SOURCE_POLICY_V2"
+REPLAY_VERSION = "R7_R1_R6_PRODUCER_REPLAY_V3"
+SOURCE_POLICY_VERSION = "R7_R1_R6_PRODUCER_SOURCE_POLICY_V3"
 FIXTURE_SCHEMA = "V16_R6_CAUSAL_PRODUCER_FIXTURE_V1"
 PRODUCER_ENTRYPOINT = "produce"
 MAX_FIXTURE_FILE_BYTES = 64 * 1024 * 1024
+MAX_PRODUCER_SOURCE_BYTES = 1024 * 1024
+MAX_FIXTURE_COUNT = 4096
+MAX_INPUT_DEPTH = 64
+MAX_INPUT_NODES_PER_FIXTURE = 100_000
+MAX_RANGE_ITEMS = 1_000_000
+MAX_EXECUTION_LINE_EVENTS = 1_000_000
 
 # The candidate is deliberately import-free. Exact frozen behavior must be
 # expressed as a pure transformation of the supplied causal input. This keeps
@@ -30,7 +37,7 @@ MAX_FIXTURE_FILE_BYTES = 64 * 1024 * 1024
 # broker, model-file and dynamically imported state.
 _SAFE_BUILTIN_NAMES = frozenset({
     "abs", "all", "any", "bool", "dict", "enumerate", "float", "int",
-    "len", "list", "max", "min", "pow", "range", "reversed", "round",
+    "len", "list", "max", "min", "pow", "reversed", "round",
     "set", "sorted", "str", "sum", "tuple", "zip",
     "ArithmeticError", "Exception", "KeyError", "TypeError", "ValueError",
 })
@@ -70,10 +77,22 @@ def _literal_only(node: ast.AST) -> bool:
     return False
 
 
+def _safe_range(*args):
+    try:
+        value = range(*args)
+    except Exception as exc:
+        raise ProducerReplayError("PRODUCER_RANGE_ARGUMENT_INVALID") from exc
+    if len(value) > MAX_RANGE_ITEMS:
+        raise ProducerReplayError("PRODUCER_RANGE_LIMIT_EXCEEDED")
+    return value
+
+
 def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
     path = Path(path).resolve()
     if not path.is_file():
         raise ProducerReplayError("PRODUCER_SOURCE_MISSING")
+    if path.stat().st_size <= 0 or path.stat().st_size > MAX_PRODUCER_SOURCE_BYTES:
+        raise ProducerReplayError("PRODUCER_SOURCE_SIZE_INVALID")
     try:
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
@@ -108,6 +127,8 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
             raise ProducerReplayError("PRODUCER_IMPORT_FORBIDDEN")
         if isinstance(node, (ast.AsyncFunctionDef, ast.Await, ast.Yield, ast.YieldFrom)):
             raise ProducerReplayError("PRODUCER_ASYNC_OR_GENERATOR_FORBIDDEN")
+        if isinstance(node, ast.While):
+            raise ProducerReplayError("PRODUCER_UNBOUNDED_WHILE_FORBIDDEN")
         if isinstance(node, (ast.ClassDef, ast.Global, ast.Nonlocal)):
             raise ProducerReplayError("PRODUCER_STATEFUL_CONSTRUCT_FORBIDDEN:" + node.__class__.__name__)
         if isinstance(node, ast.Attribute):
@@ -130,16 +151,34 @@ def verify_producer_source_policy(path: Path) -> Dict[str, Any]:
         "helper_functions": sorted(set(helper_functions) - {PRODUCER_ENTRYPOINT}),
         "imports_allowed": False,
         "classes_allowed": False,
+        "while_loops_allowed": False,
         "dunder_access_allowed": False,
         "filesystem_api_allowed": False,
         "network_api_allowed": False,
         "dynamic_import_allowed": False,
         "prohibited_data_reference_allowed": False,
+        "max_source_bytes": MAX_PRODUCER_SOURCE_BYTES,
+        "max_range_items": MAX_RANGE_ITEMS,
+        "max_execution_line_events": MAX_EXECUTION_LINE_EVENTS,
         "source_policy_pass": True,
     }
 
 
-def _walk_input(value: Any, *, cutoff: int, path: str = "input") -> None:
+def _walk_input(
+    value: Any,
+    *,
+    cutoff: int,
+    path: str = "input",
+    depth: int = 0,
+    counter: Optional[List[int]] = None,
+) -> None:
+    if counter is None:
+        counter = [0]
+    counter[0] += 1
+    if counter[0] > MAX_INPUT_NODES_PER_FIXTURE:
+        raise ProducerReplayError("FIXTURE_INPUT_NODE_LIMIT_EXCEEDED")
+    if depth > MAX_INPUT_DEPTH:
+        raise ProducerReplayError("FIXTURE_INPUT_DEPTH_LIMIT_EXCEEDED:" + path)
     if value is None or isinstance(value, (str, bool, int)):
         return
     if isinstance(value, float):
@@ -148,7 +187,7 @@ def _walk_input(value: Any, *, cutoff: int, path: str = "input") -> None:
         return
     if isinstance(value, list):
         for i, item in enumerate(value):
-            _walk_input(item, cutoff=cutoff, path=f"{path}[{i}]")
+            _walk_input(item, cutoff=cutoff, path=f"{path}[{i}]", depth=depth + 1, counter=counter)
         return
     if not isinstance(value, dict):
         raise ProducerReplayError("FIXTURE_NON_JSON_INPUT:" + path)
@@ -162,7 +201,7 @@ def _walk_input(value: Any, *, cutoff: int, path: str = "input") -> None:
             is_time = key.endswith("_ms") and any(token in key for token in ("time", "timestamp", "bar", "emitted", "signal"))
             if is_time and child > cutoff:
                 raise ProducerReplayError("FIXTURE_TIMESTAMP_AFTER_PREFIX:" + raw_key)
-        _walk_input(child, cutoff=cutoff, path=path + "." + raw_key)
+        _walk_input(child, cutoff=cutoff, path=path + "." + raw_key, depth=depth + 1, counter=counter)
 
 
 def load_fixtures(path: Path) -> List[Dict[str, Any]]:
@@ -174,6 +213,8 @@ def load_fixtures(path: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     seen = set()
     for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if len(rows) >= MAX_FIXTURE_COUNT:
+            raise ProducerReplayError("FIXTURE_COUNT_LIMIT_EXCEEDED")
         if not line.strip():
             raise ProducerReplayError(f"FIXTURE_BLANK_LINE:{line_no}")
         try:
@@ -205,6 +246,7 @@ def _load_producer(path: Path):
     source_policy = verify_producer_source_policy(path)
     source = Path(path).read_text(encoding="utf-8")
     safe_builtins = {name: getattr(builtins, name) for name in _SAFE_BUILTIN_NAMES}
+    safe_builtins["range"] = _safe_range
     namespace: Dict[str, Any] = {
         "__name__": "r7_causal_producer_candidate",
         "__builtins__": safe_builtins,
@@ -227,6 +269,24 @@ def _load_producer(path: Path):
     return fn, source_policy
 
 
+def _execute_with_budget(fn, candidate_input: Dict[str, Any], fixture_id: str):
+    events = [0]
+
+    def tracer(frame, event, arg):
+        if event in ("call", "line"):
+            events[0] += 1
+            if events[0] > MAX_EXECUTION_LINE_EVENTS:
+                raise ProducerReplayError("PRODUCER_EXECUTION_BUDGET_EXCEEDED:" + fixture_id)
+        return tracer
+
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        return fn(candidate_input)
+    finally:
+        sys.settrace(previous)
+
+
 def _canonical_stream_bytes(rows: List[Dict[str, Any]]) -> bytes:
     text = "\n".join(json.dumps(row, sort_keys=True, separators=(",", ":")) for row in rows) + "\n"
     return text.encode("utf-8")
@@ -245,7 +305,9 @@ def replay_producer(fixture_path: Path, producer_module_path: Path) -> Tuple[byt
         for _ in range(2):
             candidate_input = copy.deepcopy(original)
             try:
-                result = fn(candidate_input)
+                result = _execute_with_budget(fn, candidate_input, row["fixture_id"])
+            except ProducerReplayError:
+                raise
             except Exception as exc:
                 raise ProducerReplayError("PRODUCER_EXECUTION_FAILED:" + row["fixture_id"] + ":" + exc.__class__.__name__) from exc
             after = json.dumps(candidate_input, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -283,10 +345,18 @@ def replay_producer(fixture_path: Path, producer_module_path: Path) -> Tuple[byt
         "source_policy_pass": source_policy["source_policy_pass"],
         "imports_allowed": False,
         "classes_allowed": False,
+        "while_loops_allowed": False,
         "dunder_access_allowed": False,
         "filesystem_api_allowed": False,
         "network_api_allowed": False,
         "dynamic_import_allowed": False,
+        "range_is_bounded": True,
+        "execution_line_budget_enforced": True,
+        "max_fixture_count": MAX_FIXTURE_COUNT,
+        "max_input_depth": MAX_INPUT_DEPTH,
+        "max_input_nodes_per_fixture": MAX_INPUT_NODES_PER_FIXTURE,
+        "max_range_items": MAX_RANGE_ITEMS,
+        "max_execution_line_events": MAX_EXECUTION_LINE_EVENTS,
         "future_rows_available_to_producer": False,
         "outcome_columns_present": False,
         "final_holdout_accessed": False,
@@ -318,7 +388,7 @@ def verify_replay_evidence(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replay an import-free pure R6 causal producer against causal fixture inputs")
+    parser = argparse.ArgumentParser(description="Replay an import-free resource-bounded pure R6 causal producer against causal fixture inputs")
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--producer-module", type=Path, required=True)
     parser.add_argument("--producer-stream", type=Path, required=True)
