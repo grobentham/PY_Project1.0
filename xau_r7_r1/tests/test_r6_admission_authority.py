@@ -56,6 +56,10 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             result = verify_producer_admission(root, _reference_executor=exact_executor)
             self.assertEqual(result["authority_version"], AUTHORITY_VERSION)
             self.assertTrue(result["ready"])
+            self.assertTrue(result["source_bundle_security_contract_pass"])
+            self.assertTrue(result["source_bundle_security_contract"]["static_dependency_closure_recomputed"])
+            self.assertTrue(result["source_bundle_security_contract"]["dynamic_import_policy_recomputed"])
+            self.assertTrue(result["source_bundle_security_contract"]["prohibited_source_paths_blocked"])
             self.assertTrue(result["trusted_replay_security_contract_pass"])
             self.assertTrue(result["trusted_replay_security_contract"]["process_isolation_enforced"])
             self.assertEqual(len(result["trusted_replay_security_contract"]["worker_module_sha256"]), 64)
@@ -72,6 +76,44 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             self.assertFalse(result["final_holdout_accessed"])
             self.assertFalse(result["strategy_retuned"])
             self.assertTrue(paths["reference_replay"].is_file())
+
+    def test_missing_recomputed_source_closure_cannot_pass_v5_authority(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _, exact_executor = self.prepare(root)
+            good = verify_producer_admission(root, _reference_executor=exact_executor)
+            downgraded = dict(good)
+            source_bundle = dict(good["source_bundle"])
+            source_bundle["static_dependency_closure_recomputed"] = False
+            downgraded["source_bundle"] = source_bundle
+            with mock.patch(
+                "r7_runtime.r6_admission_authority.verify_v4_candidate_admission",
+                return_value=downgraded,
+            ):
+                with self.assertRaisesRegex(
+                    ProducerAdmissionAuthorityError,
+                    "SOURCE_BUNDLE_REQUIRED_GUARD_MISSING:static_dependency_closure_recomputed",
+                ):
+                    verify_producer_admission(root, _reference_executor=exact_executor)
+
+    def test_missing_recomputed_dynamic_import_policy_cannot_pass_v5_authority(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _, exact_executor = self.prepare(root)
+            good = verify_producer_admission(root, _reference_executor=exact_executor)
+            downgraded = dict(good)
+            source_bundle = dict(good["source_bundle"])
+            source_bundle["dynamic_import_policy_recomputed"] = False
+            downgraded["source_bundle"] = source_bundle
+            with mock.patch(
+                "r7_runtime.r6_admission_authority.verify_v4_candidate_admission",
+                return_value=downgraded,
+            ):
+                with self.assertRaisesRegex(
+                    ProducerAdmissionAuthorityError,
+                    "SOURCE_BUNDLE_REQUIRED_GUARD_MISSING:dynamic_import_policy_recomputed",
+                ):
+                    verify_producer_admission(root, _reference_executor=exact_executor)
 
     def test_downgraded_process_isolation_cannot_pass_v5_authority(self):
         with tempfile.TemporaryDirectory() as td:
@@ -142,6 +184,7 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             status = producer_admission_status(root)
             self.assertFalse(status["ready"])
             self.assertEqual(status["authority_version"], AUTHORITY_VERSION)
+            self.assertFalse(status["source_bundle_security_contract_pass"])
             self.assertFalse(status["trusted_replay_security_contract_pass"])
             self.assertFalse(status["canonical_reference_replay_pass"])
             self.assertIn("CANONICAL_REFERENCE_EXECUTOR_NOT_IMPLEMENTED", status["reason"])
