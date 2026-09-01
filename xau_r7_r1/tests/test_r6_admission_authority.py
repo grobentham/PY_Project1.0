@@ -13,7 +13,11 @@ from r7_runtime.r6_admission_authority import (
     producer_admission_status,
     verify_producer_admission,
 )
-from r7_runtime.r6_reference_replay import replay_canonical_reference
+from r7_runtime.r6_integrity import sha256_file
+from r7_runtime.r6_reference_replay import (
+    ReferenceReplayError,
+    replay_canonical_reference,
+)
 
 
 class ProducerAdmissionAuthorityTests(unittest.TestCase):
@@ -39,6 +43,44 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
         paths["reference_replay"] = reference_replay
         return paths, exact_executor
 
+    def test_reference_executor_is_not_called_before_static_closure_proof(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paths = build_trusted_fixture(root)
+            helper = root / "v16r5" / "helper.py"
+            helper.write_text("VALUE = 7\n", encoding="utf-8")
+            engine = root / "v16r5" / "engine.py"
+            engine.write_text("import v16r5.helper\n" + engine.read_text(encoding="utf-8"), encoding="utf-8")
+
+            parent = json.loads(paths["parent"].read_text(encoding="utf-8"))
+            parent["parent_tree_sha256"]["v16r5/helper.py"] = sha256_file(helper)
+            parent["parent_tree_sha256"]["v16r5/engine.py"] = sha256_file(engine)
+            parent["protected_r6_hashes"]["v16r5/engine.py"] = sha256_file(engine)
+            paths["parent"].write_text(json.dumps(parent, sort_keys=True), encoding="utf-8")
+
+            bundle = json.loads(paths["bundle"].read_text(encoding="utf-8"))
+            bundle["files"]["v16r5/engine.py"]["sha256"] = sha256_file(engine)
+            bundle["files"]["v16r5/engine.py"]["size_bytes"] = engine.stat().st_size
+            paths["bundle"].write_text(json.dumps(bundle, sort_keys=True), encoding="utf-8")
+
+            calls = []
+
+            def should_never_run(source_root: Path, fixture_path: Path) -> bytes:
+                calls.append((source_root, fixture_path))
+                return paths["reference"].read_bytes()
+
+            with self.assertRaisesRegex(
+                ReferenceReplayError,
+                "REFERENCE_SOURCE_BUNDLE_AUTHORITY_FAILED:SOURCE_BUNDLE_STATIC_CLOSURE_MISMATCH",
+            ):
+                replay_canonical_reference(
+                    root,
+                    paths["bundle"],
+                    paths["fixtures"],
+                    _executor=should_never_run,
+                )
+            self.assertEqual(calls, [])
+
     def test_production_authority_fails_closed_without_exact_source_executor(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -56,6 +98,9 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             result = verify_producer_admission(root, _reference_executor=exact_executor)
             self.assertEqual(result["authority_version"], AUTHORITY_VERSION)
             self.assertTrue(result["ready"])
+            self.assertTrue(result["reference_source_security_contract_pass"])
+            self.assertTrue(result["reference_source_security_contract"]["source_bundle_static_closure_recomputed"])
+            self.assertTrue(result["reference_source_security_contract"]["source_bundle_dynamic_import_policy_recomputed"])
             self.assertTrue(result["source_bundle_security_contract_pass"])
             self.assertTrue(result["source_bundle_security_contract"]["static_dependency_closure_recomputed"])
             self.assertTrue(result["source_bundle_security_contract"]["dynamic_import_policy_recomputed"])
@@ -64,6 +109,8 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             self.assertTrue(result["trusted_replay_security_contract"]["process_isolation_enforced"])
             self.assertEqual(len(result["trusted_replay_security_contract"]["worker_module_sha256"]), 64)
             self.assertTrue(result["canonical_reference_replay_pass"])
+            self.assertTrue(result["canonical_reference_replay"]["source_bundle_static_closure_recomputed"])
+            self.assertTrue(result["canonical_reference_replay"]["source_bundle_dynamic_import_policy_recomputed"])
             self.assertTrue(
                 result["canonical_reference_replay"][
                     "reference_generated_by_exact_canonical_source_executor"
@@ -184,6 +231,7 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             status = producer_admission_status(root)
             self.assertFalse(status["ready"])
             self.assertEqual(status["authority_version"], AUTHORITY_VERSION)
+            self.assertFalse(status["reference_source_security_contract_pass"])
             self.assertFalse(status["source_bundle_security_contract_pass"])
             self.assertFalse(status["trusted_replay_security_contract_pass"])
             self.assertFalse(status["canonical_reference_replay_pass"])
