@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 from .constants import CANONICAL_R6_ZIP_SHA256, RETIRED_SOURCE, R6_SOURCE_PRIORITY
 from .r6_integrity import sha256_file
 from .r6_producer_replay import ProducerReplayError, verify_replay_evidence
-from .r6_source_bundle import BUNDLE_VERSION
+from .r6_source_bundle import BUNDLE_VERSION, OWNERSHIP_MARKER_NAME
 from .r6_source_probe import PROBE_VERSION
 
 
@@ -20,6 +20,13 @@ PARITY_SCHEMA = "V16_R6_CAUSAL_PRODUCER_PARITY_V1"
 EXPECTED_PARITY_TOOL_VERSION = "R7_R1_R6_PRODUCER_PARITY_TOOL_V3"
 EXPECTED_ISOLATION_SCHEMA = "V16_R6_CAUSAL_FIXTURE_ISOLATION_V2"
 PRODUCER_MODULE_RELATIVE = "r7_runtime/r6_causal_producer.py"
+_PROHIBITED_SOURCE_PATH_TOKENS = (
+    "final_holdout",
+    "research_consumed_validation",
+    "protected_validation",
+    "retrospective_research",
+    "validation_result",
+)
 
 REQUIRED_SOURCE_FILES: Tuple[str, ...] = (
     "v16r6/engine.py",
@@ -55,12 +62,23 @@ def _require_false(data: Dict[str, Any], key: str, error: str) -> None:
         raise ProducerAdmissionError(error)
 
 
+def _validate_sha256_text(value: Any, error: str) -> str:
+    digest = str(value or "").lower()
+    if len(digest) != 64:
+        raise ProducerAdmissionError(error)
+    try:
+        int(digest, 16)
+    except ValueError as exc:
+        raise ProducerAdmissionError(error) from exc
+    return digest
+
+
 def _require_file_hash(path: Path, expected: Any, error: str) -> str:
     path = Path(path)
     if not path.is_file():
         raise ProducerAdmissionError(error + "_FILE_MISSING")
-    digest = str(expected or "").lower()
-    if len(digest) != 64 or sha256_file(path) != digest:
+    digest = _validate_sha256_text(expected, error + "_HASH_INVALID")
+    if sha256_file(path) != digest:
         raise ProducerAdmissionError(error + "_HASH_MISMATCH")
     return digest
 
@@ -73,10 +91,7 @@ def _normalized_hash_map(data: Any, label: str) -> Dict[str, str]:
         relative = str(key).replace("\\", "/")
         if relative in out:
             raise ProducerAdmissionError(label + "_DUPLICATE_NORMALIZED_PATH:" + relative)
-        digest = str(value).lower()
-        if len(digest) != 64:
-            raise ProducerAdmissionError(label + "_INVALID_HASH:" + relative)
-        out[relative] = digest
+        out[relative] = _validate_sha256_text(value, label + "_INVALID_HASH:" + relative)
     return out
 
 
@@ -104,7 +119,7 @@ def _validate_source_relative(relative: str) -> str:
     if not normalized.lower().endswith(".py"):
         raise ProducerAdmissionError("SOURCE_BUNDLE_NON_PYTHON_FILE:" + normalized)
     lowered = normalized.lower()
-    if lowered.startswith("research_consumed_validation/") or "final_holdout" in lowered:
+    if any(token in lowered for token in _PROHIBITED_SOURCE_PATH_TOKENS):
         raise ProducerAdmissionError("SOURCE_BUNDLE_PROHIBITED_PATH:" + normalized)
     return normalized
 
@@ -136,10 +151,20 @@ def verify_source_bundle(
     )
     _require_true(bundle, "required_local_imports_resolved", "SOURCE_BUNDLE_LOCAL_IMPORTS_UNRESOLVED")
     _require_false(bundle, "dynamic_imports_allowed", "SOURCE_BUNDLE_DYNAMIC_IMPORTS_ALLOWED")
+    _require_false(bundle, "prohibited_source_paths_allowed", "SOURCE_BUNDLE_PROHIBITED_PATHS_ALLOWED")
+    _require_true(bundle, "owned_output_replacement_only", "SOURCE_BUNDLE_OUTPUT_OWNERSHIP_NOT_PROVEN")
     _require_false(bundle, "strategy_executed", "SOURCE_BUNDLE_EXECUTED_STRATEGY")
     _require_false(bundle, "strategy_retuned", "SOURCE_BUNDLE_RETUNED_STRATEGY")
     _require_false(bundle, "final_holdout_accessed", "SOURCE_BUNDLE_HOLDOUT_BOUNDARY_BREACH")
     _require_false(bundle, "producer_admitted", "SOURCE_BUNDLE_SELF_ADMISSION_FORBIDDEN")
+
+    ownership_marker_file = bundle.get("ownership_marker_file")
+    if ownership_marker_file != OWNERSHIP_MARKER_NAME:
+        raise ProducerAdmissionError("SOURCE_BUNDLE_OWNERSHIP_MARKER_NAME_MISMATCH")
+    ownership_marker_sha256 = _validate_sha256_text(
+        bundle.get("ownership_marker_sha256"),
+        "SOURCE_BUNDLE_OWNERSHIP_MARKER_HASH_INVALID",
+    )
 
     if bundle.get("source_probe_file") != Path(source_probe_path).name:
         raise ProducerAdmissionError("SOURCE_BUNDLE_PROBE_FILENAME_MISMATCH")
@@ -176,9 +201,7 @@ def verify_source_bundle(
         entry = normalized_files[relative]
         if not isinstance(entry, dict):
             raise ProducerAdmissionError("SOURCE_BUNDLE_FILE_ENTRY_INVALID:" + relative)
-        digest = str(entry.get("sha256", "")).lower()
-        if len(digest) != 64:
-            raise ProducerAdmissionError("SOURCE_BUNDLE_FILE_HASH_INVALID:" + relative)
+        digest = _validate_sha256_text(entry.get("sha256"), "SOURCE_BUNDLE_FILE_HASH_INVALID:" + relative)
         size = _strict_nonnegative_int(entry.get("size_bytes"), "SOURCE_BUNDLE_FILE_SIZE:" + relative)
         actual = (root / relative).resolve()
         try:
@@ -212,6 +235,10 @@ def verify_source_bundle(
         "dependency_count": dependency_count,
         "verified_files": verified_files,
         "unresolved_nonarchive_imports": unresolved,
+        "prohibited_source_paths_blocked": True,
+        "owned_output_replacement_only": True,
+        "ownership_marker_file": OWNERSHIP_MARKER_NAME,
+        "ownership_marker_sha256": ownership_marker_sha256,
     }
 
 
