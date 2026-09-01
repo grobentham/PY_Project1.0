@@ -133,6 +133,37 @@ def _verify_source_bundle_security_contract(candidate: Dict[str, Any]) -> Dict[s
     }
 
 
+def _verify_reference_source_contract(reference: Dict[str, Any]) -> Dict[str, Any]:
+    if reference.get("source_bundle_version") != BUNDLE_VERSION:
+        raise ProducerAdmissionAuthorityError("REFERENCE_SOURCE_BUNDLE_VERSION_MISMATCH")
+    required_true = (
+        "source_bundle_static_closure_recomputed",
+        "source_bundle_dynamic_import_policy_recomputed",
+        "source_bundle_prohibited_paths_blocked",
+        "reference_generated_by_exact_canonical_source_executor",
+        "causal_fixture_only",
+    )
+    for key in required_true:
+        if reference.get(key) is not True:
+            raise ProducerAdmissionAuthorityError("REFERENCE_SOURCE_REQUIRED_GUARD_MISSING:" + key)
+    required_false = (
+        "future_rows_available",
+        "outcome_columns_available",
+        "final_holdout_accessed",
+        "strategy_retuned",
+    )
+    for key in required_false:
+        if reference.get(key) is not False:
+            raise ProducerAdmissionAuthorityError("REFERENCE_SOURCE_FORBIDDEN_GUARD_ENABLED:" + key)
+    return {
+        "source_bundle_version": BUNDLE_VERSION,
+        "source_bundle_static_closure_recomputed": True,
+        "source_bundle_dynamic_import_policy_recomputed": True,
+        "source_bundle_prohibited_paths_blocked": True,
+        "reference_generated_by_exact_canonical_source_executor": True,
+    }
+
+
 def verify_producer_admission(
     root: Path,
     *,
@@ -140,12 +171,11 @@ def verify_producer_admission(
 ) -> Dict[str, Any]:
     """Authoritative producer admission.
 
-    V5 requires three independent authority boundaries: the reference stream
-    must be regenerated from exact canonical frozen R6 source, candidate replay
-    must satisfy the current isolated/resource-bounded replay contract, and the
-    candidate's Source Bundle V4 claims must have been independently recomputed
-    from canonical parent bytes by lower-level admission. Production remains
-    fail-closed while the exact-source reference executor is unavailable.
+    V5 requires independent source, reference and candidate replay boundaries.
+    Source Bundle V4 closure/dynamic-import policy is recomputed before the
+    reference executor runs and again by candidate admission; the resulting
+    proofs are explicitly required here. Production remains fail-closed while
+    the exact-source reference executor is unavailable.
     """
     root = Path(root).resolve()
     source_bundle_manifest_path = root / "R7_R1_R6_SOURCE_BUNDLE_MANIFEST.json"
@@ -164,6 +194,7 @@ def verify_producer_admission(
         )
     except ReferenceReplayError as exc:
         raise ProducerAdmissionAuthorityError("CANONICAL_REFERENCE_REPLAY_FAILED:" + str(exc)) from exc
+    reference_source_contract = _verify_reference_source_contract(reference)
 
     try:
         candidate = verify_v4_candidate_admission(root)
@@ -195,6 +226,8 @@ def verify_producer_admission(
         **candidate,
         "authority_version": AUTHORITY_VERSION,
         "ready": True,
+        "reference_source_security_contract": reference_source_contract,
+        "reference_source_security_contract_pass": True,
         "source_bundle_security_contract": source_bundle_contract,
         "source_bundle_security_contract_pass": True,
         "trusted_replay_security_contract": replay_contract,
@@ -215,6 +248,7 @@ def producer_admission_status(root: Path) -> Dict[str, Any]:
             "authority_version": AUTHORITY_VERSION,
             "ready": False,
             "reason": str(exc),
+            "reference_source_security_contract_pass": False,
             "source_bundle_security_contract_pass": False,
             "trusted_replay_security_contract_pass": False,
             "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
