@@ -8,7 +8,7 @@ import shutil
 import stat
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Any, Dict, Iterable, List, Set, Tuple
 
 from .constants import CANONICAL_R6_ZIP_SHA256
 from .r6_source_probe import probe_frozen_r6_source
@@ -18,7 +18,7 @@ class R6SourceBundleError(RuntimeError):
     pass
 
 
-BUNDLE_VERSION = "R7_R1_R6_SOURCE_BUNDLE_V3"
+BUNDLE_VERSION = "R7_R1_R6_SOURCE_BUNDLE_V4"
 REQUIRED_SOURCE_FILES: Tuple[str, ...] = (
     "v16r6/engine.py",
     "v16r5/engine.py",
@@ -27,7 +27,21 @@ REQUIRED_SOURCE_FILES: Tuple[str, ...] = (
 MAX_SOURCE_FILE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_SOURCE_BYTES = 32 * 1024 * 1024
 MAX_DEPENDENCY_FILES = 512
-_DYNAMIC_IMPORT_CALLS = {"__import__", "importlib.import_module", "import_module"}
+OWNERSHIP_MARKER_NAME = ".R7_R1_SOURCE_BUNDLE_OWNERSHIP.json"
+OWNERSHIP_MARKER_MAGIC = "R7_R1_CANONICAL_SOURCE_BUNDLE_OWNED_V1"
+_PROHIBITED_SOURCE_PATH_TOKENS = (
+    "final_holdout",
+    "research_consumed_validation",
+    "protected_validation",
+    "retrospective_research",
+    "validation_result",
+)
+_BASE_DYNAMIC_IMPORT_NAMES = {
+    "__import__",
+    "builtins.__import__",
+    "importlib.import_module",
+    "import_module",
+}
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -70,6 +84,13 @@ def _decode_parse(raw: bytes, relative: str) -> ast.Module:
         raise R6SourceBundleError("R6_ZIP_SOURCE_AST_INVALID:" + relative) from exc
 
 
+def _assert_allowed_source_path(relative: str) -> None:
+    normalized = _normalize_member(relative).lower()
+    for token in _PROHIBITED_SOURCE_PATH_TOKENS:
+        if token in normalized:
+            raise R6SourceBundleError("R6_SOURCE_PROHIBITED_PATH:" + relative)
+
+
 def _module_target_candidates(parts: Iterable[str]) -> Set[str]:
     p = [x for x in parts if x]
     if not p:
@@ -98,16 +119,96 @@ def _relative_base_module(current_relative: str, node: ast.ImportFrom) -> List[s
     return base
 
 
-def _call_name(call: ast.Call) -> str:
-    fn = call.func
+def _expr_name(node: ast.AST) -> str:
     parts: List[str] = []
-    while isinstance(fn, ast.Attribute):
-        parts.append(fn.attr)
-        fn = fn.value
-    if isinstance(fn, ast.Name):
-        parts.append(fn.id)
+    current: ast.AST = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
         return ".".join(reversed(parts))
     return ""
+
+
+def _call_name(call: ast.Call) -> str:
+    return _expr_name(call.func)
+
+
+def _simple_assignment_targets(node: ast.AST) -> Set[str]:
+    out: Set[str] = set()
+    if isinstance(node, ast.Name):
+        out.add(node.id)
+    elif isinstance(node, (ast.Tuple, ast.List)):
+        for child in node.elts:
+            out |= _simple_assignment_targets(child)
+    return out
+
+
+def _dynamic_import_aliases(tree: ast.Module) -> Set[str]:
+    aliases: Set[str] = set(_BASE_DYNAMIC_IMPORT_NAMES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib" or alias.name.startswith("importlib."):
+                    aliases.add((alias.asname or "importlib") + ".import_module")
+                if alias.name == "builtins":
+                    aliases.add((alias.asname or "builtins") + ".__import__")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "importlib":
+                for alias in node.names:
+                    if alias.name in {"import_module", "*"}:
+                        aliases.add(alias.asname or "import_module")
+            elif node.module == "builtins":
+                for alias in node.names:
+                    if alias.name in {"__import__", "*"}:
+                        aliases.add(alias.asname or "__import__")
+
+    # Propagate simple aliases such as `loader = importlib.import_module` or
+    # `loader2 = loader`. This deliberately stays conservative: ambiguous or
+    # dynamic indirection is not treated as safe evidence of static closure.
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            value: Any = None
+            targets: Set[str] = set()
+            if isinstance(node, ast.Assign):
+                value = node.value
+                for target in node.targets:
+                    targets |= _simple_assignment_targets(target)
+            elif isinstance(node, ast.AnnAssign):
+                value = node.value
+                targets |= _simple_assignment_targets(node.target)
+            elif isinstance(node, ast.NamedExpr):
+                value = node.value
+                targets |= _simple_assignment_targets(node.target)
+            if value is None or not targets:
+                continue
+            source_name = _expr_name(value)
+            if source_name in aliases:
+                before = len(aliases)
+                aliases |= targets
+                changed = changed or len(aliases) != before
+    return aliases
+
+
+def _detect_dynamic_imports(tree: ast.Module) -> Set[str]:
+    aliases = _dynamic_import_aliases(tree)
+    detected: Set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node)
+        if name in aliases:
+            detected.add(name)
+            continue
+        # Reject reflective reconstruction of the two import entry points.
+        if name == "getattr" and len(node.args) >= 2:
+            attr = node.args[1]
+            if isinstance(attr, ast.Constant) and attr.value in {"import_module", "__import__"}:
+                detected.add("getattr:" + str(attr.value))
+    return detected
 
 
 def _local_roots(available_python: Set[str]) -> Set[str]:
@@ -154,7 +255,7 @@ def _local_import_dependencies(
     """
     deps: Set[str] = set()
     unresolved_nonarchive: Set[str] = set()
-    dynamic_calls = sorted({_call_name(n) for n in ast.walk(tree) if isinstance(n, ast.Call)} & _DYNAMIC_IMPORT_CALLS)
+    dynamic_calls = sorted(_detect_dynamic_imports(tree))
     if dynamic_calls:
         raise R6SourceBundleError(
             "R6_SOURCE_DYNAMIC_IMPORT_UNRESOLVED:" + relative + ":" + ",".join(dynamic_calls)
@@ -182,9 +283,6 @@ def _local_import_dependencies(
 
             if base_found:
                 deps |= resolved_base
-                # Python permits `from package import submodule`; include any
-                # archive-local alias module without assuming every imported
-                # name is itself a module.
                 for alias in node.names:
                     if alias.name == "*":
                         continue
@@ -205,14 +303,45 @@ def _local_import_dependencies(
     return deps, unresolved_nonarchive
 
 
-def _safe_prepare_output(output_root: Path, replace_existing: bool) -> None:
+def _ownership_payload(output_root: Path) -> Dict[str, str]:
+    return {
+        "owner_magic": OWNERSHIP_MARKER_MAGIC,
+        "resolved_output_root": str(Path(output_root).resolve()),
+    }
+
+
+def _read_ownership_marker(output_root: Path) -> Dict[str, Any]:
+    marker = output_root / OWNERSHIP_MARKER_NAME
+    if marker.is_symlink() or not marker.is_file():
+        raise R6SourceBundleError("R6_SOURCE_BUNDLE_OUTPUT_NOT_OWNED")
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise R6SourceBundleError("R6_SOURCE_BUNDLE_OWNERSHIP_MARKER_INVALID") from exc
+    if not isinstance(data, dict):
+        raise R6SourceBundleError("R6_SOURCE_BUNDLE_OWNERSHIP_MARKER_INVALID")
+    expected = _ownership_payload(output_root)
+    if data != expected:
+        raise R6SourceBundleError("R6_SOURCE_BUNDLE_OWNERSHIP_MARKER_MISMATCH")
+    return data
+
+
+def _safe_prepare_output(output_root: Path, replace_existing: bool) -> Path:
+    if output_root.parent == output_root:
+        raise R6SourceBundleError("R6_SOURCE_BUNDLE_OUTPUT_ROOT_UNSAFE")
     if output_root.exists():
+        if output_root.is_symlink():
+            raise R6SourceBundleError("R6_SOURCE_BUNDLE_OUTPUT_SYMLINK_FORBIDDEN")
+        if not output_root.is_dir():
+            raise R6SourceBundleError("R6_SOURCE_BUNDLE_OUTPUT_NOT_DIRECTORY")
         if not replace_existing:
             raise R6SourceBundleError("R6_SOURCE_BUNDLE_OUTPUT_EXISTS")
-        if output_root.parent == output_root:
-            raise R6SourceBundleError("R6_SOURCE_BUNDLE_OUTPUT_ROOT_UNSAFE")
+        _read_ownership_marker(output_root)
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=False)
+    marker = output_root / OWNERSHIP_MARKER_NAME
+    marker.write_text(json.dumps(_ownership_payload(output_root), sort_keys=True) + "\n", encoding="utf-8")
+    return marker
 
 
 def extract_canonical_source_bundle(
@@ -223,7 +352,10 @@ def extract_canonical_source_bundle(
     replace_existing: bool = True,
 ) -> Dict:
     parent_zip = Path(parent_zip).resolve()
-    output_root = Path(output_root).resolve()
+    raw_output_root = Path(output_root).expanduser()
+    if raw_output_root.is_symlink():
+        raise R6SourceBundleError("R6_SOURCE_BUNDLE_OUTPUT_SYMLINK_FORBIDDEN")
+    output_root = raw_output_root.resolve()
     if not parent_zip.is_file():
         raise R6SourceBundleError("CANONICAL_R6_ZIP_MISSING")
     expected = str(expected_parent_sha256).lower()
@@ -266,6 +398,7 @@ def extract_canonical_source_bundle(
                 index += 1
                 if len(queue) > MAX_DEPENDENCY_FILES:
                     raise R6SourceBundleError("R6_SOURCE_DEPENDENCY_COUNT_LIMIT_EXCEEDED")
+                _assert_allowed_source_path(relative)
                 info = members.get(relative)
                 if info is None or info.is_dir():
                     raise R6SourceBundleError("R6_SOURCE_DEPENDENCY_MISSING:" + relative)
@@ -289,11 +422,12 @@ def extract_canonical_source_bundle(
                 if unresolved:
                     unresolved_by_file[relative] = sorted(unresolved)
                 for dep in sorted(local_deps):
+                    _assert_allowed_source_path(dep)
                     if dep not in queued:
                         queued.add(dep)
                         queue.append(dep)
 
-            _safe_prepare_output(output_root, replace_existing)
+            ownership_marker = _safe_prepare_output(output_root, replace_existing)
             for relative in dependency_order:
                 raw = raw_cache[relative]
                 target = (output_root / relative).resolve()
@@ -327,6 +461,8 @@ def extract_canonical_source_bundle(
         "static_local_python_dependency_closure_extracted": True,
         "required_local_imports_resolved": True,
         "dynamic_imports_allowed": False,
+        "prohibited_source_paths_allowed": False,
+        "owned_output_replacement_only": True,
         "dependency_count": len(dependency_order),
         "required_source_files": list(REQUIRED_SOURCE_FILES),
         "dependency_closure_files": dependency_order,
@@ -338,6 +474,8 @@ def extract_canonical_source_bundle(
         "files": files,
         "source_probe_file": probe_path.name,
         "source_probe_sha256": _sha256_file(probe_path),
+        "ownership_marker_file": ownership_marker.name,
+        "ownership_marker_sha256": _sha256_file(ownership_marker),
     }
     manifest_path = output_root / "R7_R1_R6_SOURCE_BUNDLE_MANIFEST.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
