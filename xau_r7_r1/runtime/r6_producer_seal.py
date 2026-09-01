@@ -16,7 +16,7 @@ class ProducerSealError(RuntimeError):
     pass
 
 
-SEAL_VERSION = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3"
+SEAL_VERSION = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4"
 GENERATED_SEAL_FILENAME = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL.json"
 PRODUCER_MODULE_RELATIVE = "r7_runtime/r6_causal_producer.py"
 EVIDENCE_FILES: Tuple[str, ...] = (
@@ -91,6 +91,27 @@ def _baseline_guard(runtime_root: Path) -> Dict[str, Any]:
     return manifest
 
 
+def _require_security_contract(admission: Dict[str, Any]) -> Dict[str, Any]:
+    if admission.get("trusted_replay_security_contract_pass") is not True:
+        raise ProducerSealError("CANDIDATE_REPLAY_SECURITY_CONTRACT_NOT_PROVEN")
+    contract = admission.get("trusted_replay_security_contract")
+    if not isinstance(contract, dict) or not contract:
+        raise ProducerSealError("CANDIDATE_REPLAY_SECURITY_CONTRACT_MISSING")
+    if contract.get("process_isolation_enforced") is not True:
+        raise ProducerSealError("CANDIDATE_REPLAY_PROCESS_ISOLATION_NOT_PROVEN")
+    worker_hash = contract.get("worker_module_sha256")
+    if not isinstance(worker_hash, str) or len(worker_hash) != 64:
+        raise ProducerSealError("CANDIDATE_REPLAY_WORKER_HASH_INVALID")
+    try:
+        int(worker_hash, 16)
+    except ValueError as exc:
+        raise ProducerSealError("CANDIDATE_REPLAY_WORKER_HASH_INVALID") from exc
+    timeout = contract.get("wall_timeout_seconds")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or float(timeout) <= 0:
+        raise ProducerSealError("CANDIDATE_REPLAY_WALL_TIMEOUT_INVALID")
+    return dict(contract)
+
+
 def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
     runtime_root = Path(runtime_root).resolve()
     candidate_root = Path(candidate_root).resolve()
@@ -130,6 +151,7 @@ def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
             raise ProducerSealError("CANDIDATE_HOLDOUT_BOUNDARY_BREACH")
         if admission.get("strategy_retuned") is not False:
             raise ProducerSealError("CANDIDATE_RETUNING_BREACH")
+        replay_security_contract = _require_security_contract(admission)
         if admission.get("canonical_reference_replay_pass") is not True:
             raise ProducerSealError("CANDIDATE_CANONICAL_REFERENCE_REPLAY_NOT_PROVEN")
         canonical_reference = admission.get("canonical_reference_replay")
@@ -169,6 +191,8 @@ def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
         "admission_version": admission.get("admission_version"),
         "authority_version": admission.get("authority_version"),
         "admission_ready": True,
+        "trusted_replay_security_contract_pass": True,
+        "trusted_replay_security_contract": replay_security_contract,
         "canonical_reference_replay_pass": True,
         "trusted_producer_replay_pass": True,
         "producer_source_policy_pass": True,
@@ -176,7 +200,7 @@ def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
         "execution_unlocked": False,
         "final_holdout_accessed": False,
         "strategy_retuned": False,
-        "note": "V3 candidate seal proves canonical-reference replay authority plus trusted producer replay and parity admission in an isolated copy only; it does not change the constitutional readiness switch or enable order execution.",
+        "note": "V4 candidate seal proves V5 canonical-reference authority plus the exact isolated replay security contract, trusted producer replay and parity admission in an isolated copy only; it does not change the constitutional readiness switch or enable order execution.",
     }
 
 
