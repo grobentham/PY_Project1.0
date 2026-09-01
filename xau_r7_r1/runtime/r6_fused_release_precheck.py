@@ -8,6 +8,7 @@ from typing import Any, Dict
 from .constants import CANONICAL_R6_ZIP_SHA256
 from .r6_integrity import verify_runtime_package_integrity
 from .r6_producer_seal import SEAL_VERSION, seal_candidate
+from .r6_source_bundle import BUNDLE_VERSION
 
 
 class FusedReleasePrecheckError(RuntimeError):
@@ -51,11 +52,7 @@ def _validate_security_contract(seal: Dict[str, Any]) -> Dict[str, Any]:
     contract = seal.get("trusted_replay_security_contract")
     if not isinstance(contract, dict) or not contract:
         raise FusedReleasePrecheckError("SEAL_REPLAY_SECURITY_CONTRACT_MISSING")
-    _require_equal(
-        contract.get("process_isolation_enforced"),
-        True,
-        "SEAL_REPLAY_PROCESS_ISOLATION_NOT_PASS",
-    )
+    _require_equal(contract.get("process_isolation_enforced"), True, "SEAL_REPLAY_PROCESS_ISOLATION_NOT_PASS")
     for key in ("replay_version", "source_policy_version"):
         if not isinstance(contract.get(key), str) or not contract.get(key):
             raise FusedReleasePrecheckError("SEAL_REPLAY_SECURITY_FIELD_INVALID:" + key)
@@ -73,17 +70,56 @@ def _validate_security_contract(seal: Dict[str, Any]) -> Dict[str, Any]:
         value = contract.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise FusedReleasePrecheckError("SEAL_REPLAY_RESOURCE_LIMIT_INVALID:" + key)
-    return contract
+    return dict(contract)
+
+
+def _validate_source_contracts(seal: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    _require_equal(
+        seal.get("source_bundle_security_contract_pass"),
+        True,
+        "SEAL_SOURCE_BUNDLE_SECURITY_CONTRACT_NOT_PASS",
+    )
+    source_contract = seal.get("source_bundle_security_contract")
+    if not isinstance(source_contract, dict) or not source_contract:
+        raise FusedReleasePrecheckError("SEAL_SOURCE_BUNDLE_SECURITY_CONTRACT_MISSING")
+    _require_equal(source_contract.get("bundle_version"), BUNDLE_VERSION, "SEAL_SOURCE_BUNDLE_VERSION_MISMATCH")
+    for key in (
+        "static_dependency_closure_recomputed",
+        "dynamic_import_policy_recomputed",
+        "prohibited_source_paths_blocked",
+        "owned_output_replacement_only",
+    ):
+        _require_equal(source_contract.get(key), True, "SEAL_SOURCE_BUNDLE_GUARD_NOT_PASS:" + key)
+    _validate_hash(source_contract.get("ownership_marker_sha256"), "SEAL_SOURCE_BUNDLE_OWNERSHIP_MARKER_HASH_INVALID")
+
+    _require_equal(
+        seal.get("reference_source_security_contract_pass"),
+        True,
+        "SEAL_REFERENCE_SOURCE_SECURITY_CONTRACT_NOT_PASS",
+    )
+    reference_contract = seal.get("reference_source_security_contract")
+    if not isinstance(reference_contract, dict) or not reference_contract:
+        raise FusedReleasePrecheckError("SEAL_REFERENCE_SOURCE_SECURITY_CONTRACT_MISSING")
+    _require_equal(
+        reference_contract.get("source_bundle_version"),
+        BUNDLE_VERSION,
+        "SEAL_REFERENCE_SOURCE_BUNDLE_VERSION_MISMATCH",
+    )
+    for key in (
+        "source_bundle_static_closure_recomputed",
+        "source_bundle_dynamic_import_policy_recomputed",
+        "source_bundle_prohibited_paths_blocked",
+        "reference_generated_by_exact_canonical_source_executor",
+    ):
+        _require_equal(reference_contract.get(key), True, "SEAL_REFERENCE_SOURCE_GUARD_NOT_PASS:" + key)
+    return dict(source_contract), dict(reference_contract)
 
 
 def _validate_supplied_seal(seal: Dict[str, Any]) -> None:
     _require_equal(seal.get("seal_version"), SEAL_VERSION, "SEAL_VERSION_MISMATCH")
-    _require_equal(
-        seal.get("canonical_parent_zip_sha256"),
-        CANONICAL_R6_ZIP_SHA256,
-        "SEAL_PARENT_SHA_MISMATCH",
-    )
+    _require_equal(seal.get("canonical_parent_zip_sha256"), CANONICAL_R6_ZIP_SHA256, "SEAL_PARENT_SHA_MISMATCH")
     _require_equal(seal.get("admission_ready"), True, "SEAL_ADMISSION_NOT_READY")
+    _validate_source_contracts(seal)
     _validate_security_contract(seal)
     _require_equal(seal.get("canonical_reference_replay_pass"), True, "SEAL_CANONICAL_REFERENCE_REPLAY_NOT_PASS")
     _require_equal(seal.get("trusted_producer_replay_pass"), True, "SEAL_TRUSTED_REPLAY_NOT_PASS")
@@ -123,9 +159,9 @@ def verify_fused_release_precheck(
     This function is deliberately non-promoting. It never writes into the
     baseline runtime, never changes CAUSAL_R6_PRODUCER_READY and never creates
     an execution-enabled package. It verifies the locked baseline package,
-    freshly re-runs V5 admission including canonical-reference authority and
-    isolated replay-security authority, and requires the supplied V4 seal to
-    match the fresh result on every authority-bearing field.
+    freshly re-runs current V5 source/reference/replay authority, and requires
+    every source-provenance and replay-security contract in the supplied V4
+    seal to match the freshly generated seal.
     """
     runtime_root = Path(runtime_root).resolve()
     candidate_root = Path(candidate_root).resolve()
@@ -163,6 +199,10 @@ def verify_fused_release_precheck(
         "admission_version",
         "authority_version",
         "admission_ready",
+        "reference_source_security_contract_pass",
+        "reference_source_security_contract",
+        "source_bundle_security_contract_pass",
+        "source_bundle_security_contract",
         "trusted_replay_security_contract_pass",
         "trusted_replay_security_contract",
         "canonical_reference_replay_pass",
@@ -195,6 +235,10 @@ def verify_fused_release_precheck(
         "admission_version": fresh["admission_version"],
         "authority_version": fresh["authority_version"],
         "candidate_admission_ready": True,
+        "reference_source_security_contract_pass": True,
+        "reference_source_security_contract": fresh["reference_source_security_contract"],
+        "source_bundle_security_contract_pass": True,
+        "source_bundle_security_contract": fresh["source_bundle_security_contract"],
         "trusted_replay_security_contract_pass": True,
         "trusted_replay_security_contract": fresh["trusted_replay_security_contract"],
         "canonical_reference_replay_pass": True,
@@ -207,7 +251,7 @@ def verify_fused_release_precheck(
         "final_holdout_accessed": False,
         "strategy_retuned": False,
         "successor_release_required": True,
-        "note": "PASS means the V4-sealed candidate matched a fresh V5 admission including canonical-reference replay and isolated replay-security authority. This precheck does not integrate code, alter the readiness constitution, or enable trading.",
+        "note": "PASS means the V4-sealed candidate matched a fresh V5 admission including pre-reference source provenance, canonical-reference replay and isolated replay-security authority. This precheck does not integrate code, alter readiness, or enable trading.",
     }
 
 
