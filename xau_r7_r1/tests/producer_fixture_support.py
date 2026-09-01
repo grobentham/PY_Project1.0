@@ -13,7 +13,7 @@ from r7_runtime.constants import (
 from r7_runtime.r6_integrity import sha256_file
 from r7_runtime.r6_producer_parity import ISOLATION_SCHEMA, build_parity_report
 from r7_runtime.r6_producer_replay import FIXTURE_SCHEMA, replay_producer
-from r7_runtime.r6_source_bundle import BUNDLE_VERSION
+from r7_runtime.r6_source_bundle import BUNDLE_VERSION, OWNERSHIP_MARKER_NAME
 from r7_runtime.r6_source_probe import probe_frozen_r6_source
 
 
@@ -42,9 +42,7 @@ def decision(source: str, i: int) -> Dict[str, object]:
 
 
 def _canonical_jsonl(rows) -> bytes:
-    text = "\n".join(
-        json.dumps(row, sort_keys=True, separators=(",", ":")) for row in rows
-    ) + "\n"
+    text = "\n".join(json.dumps(row, sort_keys=True, separators=(",", ":")) for row in rows) + "\n"
     return text.encode("utf-8")
 
 
@@ -82,6 +80,10 @@ def build_trusted_fixture(root: Path) -> Dict[str, Path]:
     probe_path = root / "R7_R1_R6_SOURCE_PROBE.json"
     probe_path.write_text(json.dumps(probe_frozen_r6_source(root), sort_keys=True), encoding="utf-8")
 
+    # Source Bundle V4 admission evidence carries extraction-time ownership and
+    # prohibited-path claims. Admission validates these hash-bound claims while
+    # the extractor/build-preflight tests independently verify the actual marker.
+    ownership_marker_sha256 = "a" * 64
     bundle_path = root / "R7_R1_R6_SOURCE_BUNDLE_MANIFEST.json"
     bundle_path.write_text(json.dumps({
         "bundle_version": BUNDLE_VERSION,
@@ -90,6 +92,8 @@ def build_trusted_fixture(root: Path) -> Dict[str, Path]:
         "static_local_python_dependency_closure_extracted": True,
         "required_local_imports_resolved": True,
         "dynamic_imports_allowed": False,
+        "prohibited_source_paths_allowed": False,
+        "owned_output_replacement_only": True,
         "dependency_count": len(sources),
         "required_source_files": list(sources),
         "dependency_closure_files": list(sources),
@@ -108,6 +112,8 @@ def build_trusted_fixture(root: Path) -> Dict[str, Path]:
         },
         "source_probe_file": probe_path.name,
         "source_probe_sha256": sha256_file(probe_path),
+        "ownership_marker_file": OWNERSHIP_MARKER_NAME,
+        "ownership_marker_sha256": ownership_marker_sha256,
     }, sort_keys=True), encoding="utf-8")
 
     producer_module = root / "r7_runtime" / "r6_causal_producer.py"
@@ -134,12 +140,8 @@ def build_trusted_fixture(root: Path) -> Dict[str, Path]:
         })
 
     fixture_path = root / "R7_R1_R6_PARITY_FIXTURES.jsonl"
-    fixture_path.write_text(
-        "\n".join(json.dumps(x, sort_keys=True) for x in fixture_rows) + "\n",
-        encoding="utf-8",
-    )
+    fixture_path.write_text("\n".join(json.dumps(x, sort_keys=True) for x in fixture_rows) + "\n", encoding="utf-8")
     reference_path = root / "R7_R1_R6_REFERENCE_STREAM.jsonl"
-    # Hash-bound canonical JSONL must be byte-identical across Linux and Windows.
     reference_path.write_bytes(_canonical_jsonl(reference_rows))
 
     producer_stream_path = root / "R7_R1_R6_PRODUCER_STREAM.jsonl"
