@@ -40,6 +40,7 @@ This closure does **not** claim autonomous R6 trading is implemented. `CAUSAL_R6
 | Strategy preservation | Inherited parent tree and protected R6 strategy/policy files are hash verified. |
 | Runtime integrity | Exact R7 Python path set, launcher and operator toolkit are hash covered; untracked runtime Python fails closed. |
 | Protected path ambiguity | Verification uses exact manifest paths, so extracted source-workspace shadow copies cannot confuse protected-file resolution. |
+| Canonical source build proof | Release builder now extracts the exact frozen Python dependency closure into a temporary workspace and AST-validates the required R5/R6 engine contract before PASS; source is not executed, retuned, or packaged as a new copy. |
 | Persistent state | SQLite WAL + `synchronous=FULL`, transactional state/audit writes and semantic ledger replay. |
 | State tampering | Deleted/injected intents/state/tickets, payload mutation and audit discontinuity fail closed. |
 | Idempotency | Transactional local payload identity plus broker magic/comment duplicate reconciliation. |
@@ -68,6 +69,23 @@ The canonical-source extractor:
 - rejects duplicate ZIP members, path traversal, symlinks, unsafe sizes and dynamic imports;
 - records non-archive dependencies explicitly;
 - excludes research/outcome/Holdout data.
+
+### Build source preflight V1
+
+`R7_R1_CANONICAL_SOURCE_BUILD_PREFLIGHT_V1` is now part of the release build gate. `BUILD_R7_R1.ps1` must successfully run the source-bundle extractor and source probe against the exact supplied canonical R6 ZIP before package creation.
+
+The build preflight requires:
+
+- canonical parent SHA match;
+- source-only extraction;
+- local Python dependency closure verified;
+- required frozen engine contract present;
+- strategy execution false;
+- strategy retuning false;
+- Final Holdout access false;
+- producer admission false.
+
+Only a non-sensitive summary and required-source hashes are written to `R7_R1_BUILD_VERIFICATION.json`. The normalized source/probe workspace stays under the GUID-named temporary build directory and is deleted by the builder cleanup. Clean extraction then requires the packaged build-verification record to carry source-preflight PASS evidence bound to the canonical R6 SHA.
 
 ### Source Probe V2
 
@@ -181,9 +199,11 @@ The remaining autonomous-system work is **not another broker-runtime repair**. I
 
 The canonical R6 ZIP is available in the project Library, but the current ChatGPT local command/Python backend fails before process start and the file service does not expose ZIP member source. This tooling limitation is not permission to approximate the strategy.
 
+The new build-source preflight reduces the next release-build uncertainty: once `BUILD_R7_R1.ps1` is run in an environment that can open the canonical ZIP, source-closure readability and frozen-engine structure are mandatory build evidence rather than an unchecked assumption. It does not, by itself, authorize or synthesize the missing causal executor.
+
 ## Build/release status
 
-`BUILD_R7_R1.ps1` is designed to create and clean-extraction-certify a **producer-locked R7-R1 baseline** while preserving canonical R6 bytes. It also packages/hash-covers the producer operator toolkit.
+`BUILD_R7_R1.ps1` is designed to create and clean-extraction-certify a **producer-locked R7-R1 baseline** while preserving canonical R6 bytes. It packages/hash-covers the producer operator toolkit and now requires canonical source-bundle/probe preflight against the exact R6 archive before PASS.
 
 No legitimate producer-enabled fused ZIP has been created yet.
 
