@@ -8,15 +8,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Tuple
 
 from .constants import CANONICAL_R6_ZIP_SHA256
+from .r6_admission_authority import verify_producer_admission
 from .r6_integrity import sha256_file
-from .r6_producer_admission import verify_producer_admission
 
 
 class ProducerSealError(RuntimeError):
     pass
 
 
-SEAL_VERSION = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V2"
+SEAL_VERSION = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3"
 GENERATED_SEAL_FILENAME = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL.json"
 PRODUCER_MODULE_RELATIVE = "r7_runtime/r6_causal_producer.py"
 EVIDENCE_FILES: Tuple[str, ...] = (
@@ -25,6 +25,7 @@ EVIDENCE_FILES: Tuple[str, ...] = (
     "R7_R1_R6_PARITY_FIXTURES.jsonl",
     "R7_R1_R6_PRODUCER_REPLAY.json",
     "R7_R1_R6_REFERENCE_STREAM.jsonl",
+    "R7_R1_R6_REFERENCE_REPLAY.json",
     "R7_R1_R6_PRODUCER_STREAM.jsonl",
     "R7_R1_R6_PARITY_ISOLATION.json",
     "R7_R1_R6_PRODUCER_PARITY.json",
@@ -129,6 +130,17 @@ def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
             raise ProducerSealError("CANDIDATE_HOLDOUT_BOUNDARY_BREACH")
         if admission.get("strategy_retuned") is not False:
             raise ProducerSealError("CANDIDATE_RETUNING_BREACH")
+        if admission.get("canonical_reference_replay_pass") is not True:
+            raise ProducerSealError("CANDIDATE_CANONICAL_REFERENCE_REPLAY_NOT_PROVEN")
+        canonical_reference = admission.get("canonical_reference_replay")
+        if not isinstance(canonical_reference, dict):
+            raise ProducerSealError("CANDIDATE_CANONICAL_REFERENCE_EVIDENCE_MISSING")
+        if canonical_reference.get("reference_generated_by_exact_canonical_source_executor") is not True:
+            raise ProducerSealError("CANDIDATE_CANONICAL_REFERENCE_EXECUTOR_NOT_PROVEN")
+        if canonical_reference.get("final_holdout_accessed") is not False:
+            raise ProducerSealError("CANDIDATE_REFERENCE_HOLDOUT_BOUNDARY_BREACH")
+        if canonical_reference.get("strategy_retuned") is not False:
+            raise ProducerSealError("CANDIDATE_REFERENCE_RETUNING_BREACH")
         replay = admission.get("trusted_replay")
         if not isinstance(replay, dict) or replay.get("deterministic_double_run") is not True:
             raise ProducerSealError("CANDIDATE_TRUSTED_REPLAY_NOT_PROVEN")
@@ -151,16 +163,20 @@ def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
         "producer_module_sha256": candidate_hashes[PRODUCER_MODULE_RELATIVE],
         "fixture_corpus_sha256": candidate_hashes["R7_R1_R6_PARITY_FIXTURES.jsonl"],
         "producer_replay_attestation_sha256": candidate_hashes["R7_R1_R6_PRODUCER_REPLAY.json"],
+        "reference_stream_sha256": candidate_hashes["R7_R1_R6_REFERENCE_STREAM.jsonl"],
+        "reference_replay_attestation_sha256": candidate_hashes["R7_R1_R6_REFERENCE_REPLAY.json"],
         "producer_stream_sha256": candidate_hashes["R7_R1_R6_PRODUCER_STREAM.jsonl"],
         "admission_version": admission.get("admission_version"),
+        "authority_version": admission.get("authority_version"),
         "admission_ready": True,
+        "canonical_reference_replay_pass": True,
         "trusted_producer_replay_pass": True,
         "producer_source_policy_pass": True,
         "baseline_mutated": False,
         "execution_unlocked": False,
         "final_holdout_accessed": False,
         "strategy_retuned": False,
-        "note": "Candidate seal proves trusted replay plus parity admission in an isolated copy only; it does not change the constitutional readiness switch or enable order execution.",
+        "note": "V3 candidate seal proves canonical-reference replay authority plus trusted producer replay and parity admission in an isolated copy only; it does not change the constitutional readiness switch or enable order execution.",
     }
 
 
