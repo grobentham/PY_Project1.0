@@ -6,7 +6,7 @@ R7-R1 is a hardened operational runtime around the frozen V16 R6 strategy packag
 
 The **broker/risk/state/containment runtime repair scope is closed**: the adversarial repair audit has no known open Critical/High/Medium runtime defect. The runtime/test tree is exercised on Linux Python 3.9/3.11/3.13 and Windows Python 3.11, including Windows PowerShell parser checks and the Windows single-instance-lock path.
 
-The **causal-producer verification infrastructure now uses V5 admission authority**. It includes exact-source extraction, local Python dependency closure, deep AST source mapping, trusted deterministic candidate replay, parity evidence, canonical-reference replay authority, isolated candidate sealing and a non-promoting fused-release eligibility precheck.
+The **causal-producer verification infrastructure now uses V5 admission authority**. It includes exact-source extraction, local Python dependency closure, deep AST source mapping, resource-bounded deterministic candidate replay, parity evidence, canonical-reference replay authority, isolated candidate sealing and a non-promoting fused-release eligibility precheck.
 
 The actual exact causal `r6_causal_producer.py` and exact canonical R6 reference executor have **not** been implemented/admitted from the frozen source yet. Therefore packaged R7-R1 order sending remains hard-locked even on demo. Real/live-account execution is prohibited.
 
@@ -72,12 +72,14 @@ The producer chain is deliberately fail-closed:
 
 1. **Canonical source bundle V3** — requires the exact canonical R6 ZIP SHA-256, extracts only frozen Python source and its archive-local dependency closure, and rejects unsafe/dynamic/ambiguous source loading.
 2. **Source probe V2** — records normalized AST source, function hashes, calls, assignments and literals without executing the strategy.
-3. **Trusted producer replay** — independently executes a candidate producer against causal fixtures twice, rejects nondeterminism/input mutation/imports/unsafe builtins/future or outcome-labelled fixture data, and regenerates the producer stream.
+3. **Trusted producer replay V3 / source policy V3** — independently executes a candidate producer against causal fixtures twice and regenerates the producer stream. Candidate imports, filesystem/network APIs, unsafe builtins, classes, global/nonlocal state, dunder access, `while` loops, future/outcome-labelled inputs, nondeterminism and input mutation fail closed. Replay also enforces a 1 MiB producer-source cap, at most 4,096 fixtures, maximum input depth 64, at most 100,000 input nodes per fixture, bounded `range()` of at most 1,000,000 items, and a 1,000,000 Python call/line-event execution budget per candidate invocation.
 4. **Parity evidence** — requires zero selection/priority/geometry/lot/timestamp mismatches, zero lookahead violations and zero retired-source emissions.
 5. **Canonical reference replay authority** — independently regenerates the reference stream from the exact canonical R6 source. A supplied/self-authored reference stream is not authority.
 6. **Producer Admission Authority V5** — requires both canonical-reference replay and the trusted candidate replay/parity chain.
 7. **Candidate Seal V3** — re-runs V5 admission in an isolated baseline copy and records hashes for the producer, fixtures, producer replay, canonical reference stream, canonical reference replay attestation and producer stream.
 8. **Fused-release Precheck V3** — verifies the locked baseline, freshly reseals the candidate and requires the supplied V3 seal to match. PASS only means eligibility for a separate successor fused-build step.
+
+The replay limits are a fail-closed certification guard against obvious runaway Python candidates; they are not presented as a perfect operating-system sandbox or a complete defense against every possible expensive C-level Python operation.
 
 The production canonical-reference executor is intentionally fail-closed today with:
 
