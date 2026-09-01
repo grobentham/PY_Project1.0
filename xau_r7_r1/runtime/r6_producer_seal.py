@@ -10,6 +10,7 @@ from typing import Any, Dict, Tuple
 from .constants import CANONICAL_R6_ZIP_SHA256
 from .r6_admission_authority import verify_producer_admission
 from .r6_integrity import sha256_file
+from .r6_source_bundle import BUNDLE_VERSION
 
 
 class ProducerSealError(RuntimeError):
@@ -91,6 +92,16 @@ def _baseline_guard(runtime_root: Path) -> Dict[str, Any]:
     return manifest
 
 
+def _validate_hash(value: Any, error: str) -> str:
+    if not isinstance(value, str) or len(value) != 64:
+        raise ProducerSealError(error)
+    try:
+        int(value, 16)
+    except ValueError as exc:
+        raise ProducerSealError(error) from exc
+    return value.lower()
+
+
 def _require_security_contract(admission: Dict[str, Any]) -> Dict[str, Any]:
     if admission.get("trusted_replay_security_contract_pass") is not True:
         raise ProducerSealError("CANDIDATE_REPLAY_SECURITY_CONTRACT_NOT_PROVEN")
@@ -99,17 +110,50 @@ def _require_security_contract(admission: Dict[str, Any]) -> Dict[str, Any]:
         raise ProducerSealError("CANDIDATE_REPLAY_SECURITY_CONTRACT_MISSING")
     if contract.get("process_isolation_enforced") is not True:
         raise ProducerSealError("CANDIDATE_REPLAY_PROCESS_ISOLATION_NOT_PROVEN")
-    worker_hash = contract.get("worker_module_sha256")
-    if not isinstance(worker_hash, str) or len(worker_hash) != 64:
-        raise ProducerSealError("CANDIDATE_REPLAY_WORKER_HASH_INVALID")
-    try:
-        int(worker_hash, 16)
-    except ValueError as exc:
-        raise ProducerSealError("CANDIDATE_REPLAY_WORKER_HASH_INVALID") from exc
+    _validate_hash(contract.get("worker_module_sha256"), "CANDIDATE_REPLAY_WORKER_HASH_INVALID")
     timeout = contract.get("wall_timeout_seconds")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or float(timeout) <= 0:
         raise ProducerSealError("CANDIDATE_REPLAY_WALL_TIMEOUT_INVALID")
     return dict(contract)
+
+
+def _require_source_security_contracts(admission: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if admission.get("source_bundle_security_contract_pass") is not True:
+        raise ProducerSealError("CANDIDATE_SOURCE_BUNDLE_SECURITY_CONTRACT_NOT_PROVEN")
+    source_contract = admission.get("source_bundle_security_contract")
+    if not isinstance(source_contract, dict) or not source_contract:
+        raise ProducerSealError("CANDIDATE_SOURCE_BUNDLE_SECURITY_CONTRACT_MISSING")
+    if source_contract.get("bundle_version") != BUNDLE_VERSION:
+        raise ProducerSealError("CANDIDATE_SOURCE_BUNDLE_VERSION_MISMATCH")
+    for key in (
+        "static_dependency_closure_recomputed",
+        "dynamic_import_policy_recomputed",
+        "prohibited_source_paths_blocked",
+        "owned_output_replacement_only",
+    ):
+        if source_contract.get(key) is not True:
+            raise ProducerSealError("CANDIDATE_SOURCE_BUNDLE_GUARD_NOT_PROVEN:" + key)
+    _validate_hash(
+        source_contract.get("ownership_marker_sha256"),
+        "CANDIDATE_SOURCE_BUNDLE_OWNERSHIP_MARKER_HASH_INVALID",
+    )
+
+    if admission.get("reference_source_security_contract_pass") is not True:
+        raise ProducerSealError("CANDIDATE_REFERENCE_SOURCE_SECURITY_CONTRACT_NOT_PROVEN")
+    reference_contract = admission.get("reference_source_security_contract")
+    if not isinstance(reference_contract, dict) or not reference_contract:
+        raise ProducerSealError("CANDIDATE_REFERENCE_SOURCE_SECURITY_CONTRACT_MISSING")
+    if reference_contract.get("source_bundle_version") != BUNDLE_VERSION:
+        raise ProducerSealError("CANDIDATE_REFERENCE_SOURCE_BUNDLE_VERSION_MISMATCH")
+    for key in (
+        "source_bundle_static_closure_recomputed",
+        "source_bundle_dynamic_import_policy_recomputed",
+        "source_bundle_prohibited_paths_blocked",
+        "reference_generated_by_exact_canonical_source_executor",
+    ):
+        if reference_contract.get(key) is not True:
+            raise ProducerSealError("CANDIDATE_REFERENCE_SOURCE_GUARD_NOT_PROVEN:" + key)
+    return dict(source_contract), dict(reference_contract)
 
 
 def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
@@ -151,14 +195,21 @@ def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
             raise ProducerSealError("CANDIDATE_HOLDOUT_BOUNDARY_BREACH")
         if admission.get("strategy_retuned") is not False:
             raise ProducerSealError("CANDIDATE_RETUNING_BREACH")
+        source_bundle_security_contract, reference_source_security_contract = _require_source_security_contracts(admission)
         replay_security_contract = _require_security_contract(admission)
         if admission.get("canonical_reference_replay_pass") is not True:
             raise ProducerSealError("CANDIDATE_CANONICAL_REFERENCE_REPLAY_NOT_PROVEN")
         canonical_reference = admission.get("canonical_reference_replay")
         if not isinstance(canonical_reference, dict):
             raise ProducerSealError("CANDIDATE_CANONICAL_REFERENCE_EVIDENCE_MISSING")
-        if canonical_reference.get("reference_generated_by_exact_canonical_source_executor") is not True:
-            raise ProducerSealError("CANDIDATE_CANONICAL_REFERENCE_EXECUTOR_NOT_PROVEN")
+        for key in (
+            "source_bundle_static_closure_recomputed",
+            "source_bundle_dynamic_import_policy_recomputed",
+            "source_bundle_prohibited_paths_blocked",
+            "reference_generated_by_exact_canonical_source_executor",
+        ):
+            if canonical_reference.get(key) is not True:
+                raise ProducerSealError("CANDIDATE_CANONICAL_REFERENCE_SOURCE_GUARD_NOT_PROVEN:" + key)
         if canonical_reference.get("final_holdout_accessed") is not False:
             raise ProducerSealError("CANDIDATE_REFERENCE_HOLDOUT_BOUNDARY_BREACH")
         if canonical_reference.get("strategy_retuned") is not False:
@@ -191,6 +242,10 @@ def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
         "admission_version": admission.get("admission_version"),
         "authority_version": admission.get("authority_version"),
         "admission_ready": True,
+        "reference_source_security_contract_pass": True,
+        "reference_source_security_contract": reference_source_security_contract,
+        "source_bundle_security_contract_pass": True,
+        "source_bundle_security_contract": source_bundle_security_contract,
         "trusted_replay_security_contract_pass": True,
         "trusted_replay_security_contract": replay_security_contract,
         "canonical_reference_replay_pass": True,
@@ -200,7 +255,7 @@ def seal_candidate(runtime_root: Path, candidate_root: Path) -> Dict[str, Any]:
         "execution_unlocked": False,
         "final_holdout_accessed": False,
         "strategy_retuned": False,
-        "note": "V4 candidate seal proves V5 canonical-reference authority plus the exact isolated replay security contract, trusted producer replay and parity admission in an isolated copy only; it does not change the constitutional readiness switch or enable order execution.",
+        "note": "V4 candidate seal proves V5 source provenance, pre-reference-execution canonical source authority, exact isolated replay security, trusted producer replay and parity admission in an isolated copy only; it does not change the readiness switch or enable order execution.",
     }
 
 
