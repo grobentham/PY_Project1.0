@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from producer_fixture_support import build_trusted_fixture
 from r7_runtime.r6_admission_authority import (
@@ -29,7 +30,6 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             paths["fixtures"],
             _executor=exact_executor,
         )
-        # The canonical executor owns the exact serialized reference bytes.
         paths["reference"].write_bytes(stream)
         reference_replay = root / "R7_R1_R6_REFERENCE_REPLAY.json"
         reference_replay.write_text(
@@ -56,6 +56,9 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             result = verify_producer_admission(root, _reference_executor=exact_executor)
             self.assertEqual(result["authority_version"], AUTHORITY_VERSION)
             self.assertTrue(result["ready"])
+            self.assertTrue(result["trusted_replay_security_contract_pass"])
+            self.assertTrue(result["trusted_replay_security_contract"]["process_isolation_enforced"])
+            self.assertEqual(len(result["trusted_replay_security_contract"]["worker_module_sha256"]), 64)
             self.assertTrue(result["canonical_reference_replay_pass"])
             self.assertTrue(
                 result["canonical_reference_replay"][
@@ -69,6 +72,44 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             self.assertFalse(result["final_holdout_accessed"])
             self.assertFalse(result["strategy_retuned"])
             self.assertTrue(paths["reference_replay"].is_file())
+
+    def test_downgraded_process_isolation_cannot_pass_v5_authority(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _, exact_executor = self.prepare(root)
+            good = verify_producer_admission(root, _reference_executor=exact_executor)
+            downgraded = dict(good)
+            replay = dict(good["trusted_replay"])
+            replay["process_isolation_enforced"] = False
+            downgraded["trusted_replay"] = replay
+            with mock.patch(
+                "r7_runtime.r6_admission_authority.verify_v4_candidate_admission",
+                return_value=downgraded,
+            ):
+                with self.assertRaisesRegex(
+                    ProducerAdmissionAuthorityError,
+                    "TRUSTED_REPLAY_REQUIRED_GUARD_MISSING:process_isolation_enforced",
+                ):
+                    verify_producer_admission(root, _reference_executor=exact_executor)
+
+    def test_downgraded_replay_version_cannot_pass_v5_authority(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _, exact_executor = self.prepare(root)
+            good = verify_producer_admission(root, _reference_executor=exact_executor)
+            downgraded = dict(good)
+            replay = dict(good["trusted_replay"])
+            replay["replay_version"] = "R7_R1_R6_PRODUCER_REPLAY_V3"
+            downgraded["trusted_replay"] = replay
+            with mock.patch(
+                "r7_runtime.r6_admission_authority.verify_v4_candidate_admission",
+                return_value=downgraded,
+            ):
+                with self.assertRaisesRegex(
+                    ProducerAdmissionAuthorityError,
+                    "TRUSTED_REPLAY_VERSION_MISMATCH",
+                ):
+                    verify_producer_admission(root, _reference_executor=exact_executor)
 
     def test_supplied_reference_changed_after_attestation_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
@@ -101,6 +142,7 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             status = producer_admission_status(root)
             self.assertFalse(status["ready"])
             self.assertEqual(status["authority_version"], AUTHORITY_VERSION)
+            self.assertFalse(status["trusted_replay_security_contract_pass"])
             self.assertFalse(status["canonical_reference_replay_pass"])
             self.assertIn("CANONICAL_REFERENCE_EXECUTOR_NOT_IMPLEMENTED", status["reason"])
             self.assertFalse(status["final_holdout_accessed"])
