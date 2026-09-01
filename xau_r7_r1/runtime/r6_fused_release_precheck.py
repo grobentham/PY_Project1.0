@@ -14,7 +14,7 @@ class FusedReleasePrecheckError(RuntimeError):
     pass
 
 
-PRECHECK_VERSION = "R7_R1_R6_FUSED_RELEASE_PRECHECK_V3"
+PRECHECK_VERSION = "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4"
 
 
 def _load_json(path: Path, label: str) -> Dict[str, Any]:
@@ -42,6 +42,40 @@ def _validate_hash(value: Any, error: str) -> str:
     return value.lower()
 
 
+def _validate_security_contract(seal: Dict[str, Any]) -> Dict[str, Any]:
+    _require_equal(
+        seal.get("trusted_replay_security_contract_pass"),
+        True,
+        "SEAL_REPLAY_SECURITY_CONTRACT_NOT_PASS",
+    )
+    contract = seal.get("trusted_replay_security_contract")
+    if not isinstance(contract, dict) or not contract:
+        raise FusedReleasePrecheckError("SEAL_REPLAY_SECURITY_CONTRACT_MISSING")
+    _require_equal(
+        contract.get("process_isolation_enforced"),
+        True,
+        "SEAL_REPLAY_PROCESS_ISOLATION_NOT_PASS",
+    )
+    for key in ("replay_version", "source_policy_version"):
+        if not isinstance(contract.get(key), str) or not contract.get(key):
+            raise FusedReleasePrecheckError("SEAL_REPLAY_SECURITY_FIELD_INVALID:" + key)
+    _validate_hash(contract.get("worker_module_sha256"), "SEAL_REPLAY_WORKER_HASH_INVALID")
+    timeout = contract.get("wall_timeout_seconds")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or float(timeout) <= 0:
+        raise FusedReleasePrecheckError("SEAL_REPLAY_WALL_TIMEOUT_INVALID")
+    for key in (
+        "max_fixture_count",
+        "max_input_depth",
+        "max_input_nodes_per_fixture",
+        "max_range_items",
+        "max_execution_line_events",
+    ):
+        value = contract.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise FusedReleasePrecheckError("SEAL_REPLAY_RESOURCE_LIMIT_INVALID:" + key)
+    return contract
+
+
 def _validate_supplied_seal(seal: Dict[str, Any]) -> None:
     _require_equal(seal.get("seal_version"), SEAL_VERSION, "SEAL_VERSION_MISMATCH")
     _require_equal(
@@ -50,6 +84,7 @@ def _validate_supplied_seal(seal: Dict[str, Any]) -> None:
         "SEAL_PARENT_SHA_MISMATCH",
     )
     _require_equal(seal.get("admission_ready"), True, "SEAL_ADMISSION_NOT_READY")
+    _validate_security_contract(seal)
     _require_equal(seal.get("canonical_reference_replay_pass"), True, "SEAL_CANONICAL_REFERENCE_REPLAY_NOT_PASS")
     _require_equal(seal.get("trusted_producer_replay_pass"), True, "SEAL_TRUSTED_REPLAY_NOT_PASS")
     _require_equal(seal.get("producer_source_policy_pass"), True, "SEAL_SOURCE_POLICY_NOT_PASS")
@@ -83,14 +118,14 @@ def verify_fused_release_precheck(
     candidate_root: Path,
     supplied_seal_path: Path,
 ) -> Dict[str, Any]:
-    """Prove a sealed producer candidate is eligible for a future fused build.
+    """Prove a V4-sealed producer candidate is eligible for a future fused build.
 
     This function is deliberately non-promoting. It never writes into the
     baseline runtime, never changes CAUSAL_R6_PRODUCER_READY and never creates
     an execution-enabled package. It verifies the locked baseline package,
-    freshly re-runs isolated candidate admission including canonical-reference
-    replay authority and trusted producer replay, and requires the supplied
-    seal to match that fresh result exactly on all authority-bearing fields.
+    freshly re-runs V5 admission including canonical-reference authority and
+    isolated replay-security authority, and requires the supplied V4 seal to
+    match the fresh result on every authority-bearing field.
     """
     runtime_root = Path(runtime_root).resolve()
     candidate_root = Path(candidate_root).resolve()
@@ -128,6 +163,8 @@ def verify_fused_release_precheck(
         "admission_version",
         "authority_version",
         "admission_ready",
+        "trusted_replay_security_contract_pass",
+        "trusted_replay_security_contract",
         "canonical_reference_replay_pass",
         "trusted_producer_replay_pass",
         "producer_source_policy_pass",
@@ -158,6 +195,8 @@ def verify_fused_release_precheck(
         "admission_version": fresh["admission_version"],
         "authority_version": fresh["authority_version"],
         "candidate_admission_ready": True,
+        "trusted_replay_security_contract_pass": True,
+        "trusted_replay_security_contract": fresh["trusted_replay_security_contract"],
         "canonical_reference_replay_pass": True,
         "trusted_producer_replay_pass": True,
         "producer_source_policy_pass": True,
@@ -168,12 +207,12 @@ def verify_fused_release_precheck(
         "final_holdout_accessed": False,
         "strategy_retuned": False,
         "successor_release_required": True,
-        "note": "PASS means the sealed candidate passed fresh canonical-reference replay authority, trusted producer replay and parity admission and is eligible to enter a separate fused-build/certification step. This precheck does not integrate code, alter the readiness constitution, or enable trading.",
+        "note": "PASS means the V4-sealed candidate matched a fresh V5 admission including canonical-reference replay and isolated replay-security authority. This precheck does not integrate code, alter the readiness constitution, or enable trading.",
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Precheck a sealed R6 producer candidate for a future fused release")
+    parser = argparse.ArgumentParser(description="Precheck a V4-sealed R6 producer candidate for a future fused release")
     parser.add_argument("--runtime-root", type=Path, required=True)
     parser.add_argument("--candidate-root", type=Path, required=True)
     parser.add_argument("--seal", type=Path, required=True)
