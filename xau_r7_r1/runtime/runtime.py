@@ -22,9 +22,9 @@ from .execution import ExecutionEngine
 from .instance_lock import SingleInstanceLock
 from .models import OrderIntent
 from .mt5_gateway import MT5Gateway
+from .r6_admission_authority import producer_admission_status
 from .r6_bridge import R6InboxProcessor
 from .r6_integrity import verify_runtime_package_integrity
-from .r6_producer_admission import producer_admission_status
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = ROOT / "r7_runtime_state"
@@ -77,10 +77,17 @@ def load_config() -> Dict[str, Any]:
 
 
 def producer_execution_admitted() -> bool:
-    """Require both the constitutional readiness switch and exact admission evidence."""
+    """Require readiness plus V5 canonical-reference admission authority."""
     if not CAUSAL_R6_PRODUCER_READY:
         return False
-    return bool(producer_admission_status(ROOT).get("ready", False))
+    status = producer_admission_status(ROOT)
+    return bool(
+        status.get("ready", False)
+        and status.get("canonical_reference_replay_pass", False)
+        and status.get("authority_version") == "R7_R1_R6_PRODUCER_ADMISSION_AUTHORITY_V5"
+        and status.get("final_holdout_accessed") is False
+        and status.get("strategy_retuned") is False
+    )
 
 
 def demo_execution_enabled(cfg: Dict[str, Any]) -> bool:
@@ -137,9 +144,10 @@ def offline_status(store: AuditStore, package_integrity: Dict[str, Any], store_i
         "integrity": package_integrity,
         "state_integrity": store_integrity,
         "demo_execution_requested": cfg["request_demo_execution"],
-        "producer_readiness_switch": bool(CAUSAL_R6_PRODUCER_READY),
-        "producer_admission": admission,
-        "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY) and bool(admission.get("ready", False)),
+        "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY),
+        "producer_admission_ready": bool(admission.get("ready", False)),
+        "producer_admission_authority_version": admission.get("authority_version"),
+        "canonical_reference_replay_pass": bool(admission.get("canonical_reference_replay_pass", False)),
         "execution_unlocked": demo_execution_enabled(cfg),
         "raw_intent_send_authority": False,
         "diagnostic_preflight_uses_operational_ledger": False,
@@ -157,9 +165,10 @@ def connected_status(store: AuditStore, gateway: MT5Gateway, cfg: Dict[str, Any]
         "integrity": package_integrity,
         "state_integrity": store_integrity,
         "demo_execution_requested": cfg["request_demo_execution"],
-        "producer_readiness_switch": bool(CAUSAL_R6_PRODUCER_READY),
-        "producer_admission": admission,
-        "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY) and bool(admission.get("ready", False)),
+        "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY),
+        "producer_admission_ready": bool(admission.get("ready", False)),
+        "producer_admission_authority_version": admission.get("authority_version"),
+        "canonical_reference_replay_pass": bool(admission.get("canonical_reference_replay_pass", False)),
         "execution_unlocked": demo_execution_enabled(cfg),
         "raw_intent_send_authority": False,
         "diagnostic_preflight_uses_operational_ledger": False,
@@ -217,10 +226,12 @@ def main() -> None:
                 print(json.dumps(bridge.clear_pause(args.resume_ack), indent=2, sort_keys=True))
                 return
             if args.process_r6_decision or args.drain_r6_inbox or args.run_r6_inbox:
+                if not CAUSAL_R6_PRODUCER_READY:
+                    raise RuntimeError("CAUSAL_R6_PRODUCER_NOT_ADMITTED: automatic decision execution remains hard-locked")
                 if not producer_execution_admitted():
-                    raise RuntimeError("CAUSAL_R6_PRODUCER_NOT_ADMITTED: exact source/parity admission is required before automatic decision execution")
+                    raise RuntimeError("CAUSAL_R6_PRODUCER_V5_AUTHORITY_NOT_ADMITTED: canonical-reference replay authority is required")
                 if not execution_enabled:
-                    raise RuntimeError("R6_INBOX_DEMO_EXECUTION_LOCKED: automatic decision consumption requires producer admission plus both demo unlocks")
+                    raise RuntimeError("R6_INBOX_DEMO_EXECUTION_LOCKED: automatic decision consumption is disabled until all producer and demo unlock gates pass")
             if args.process_r6_decision:
                 print(json.dumps(bridge.process_path(args.process_r6_decision), indent=2, sort_keys=True))
                 return
