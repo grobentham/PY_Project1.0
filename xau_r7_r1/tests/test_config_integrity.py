@@ -28,6 +28,7 @@ class ConfigTests(unittest.TestCase):
         return {
             "ready": True,
             "authority_version": "R7_R1_R6_PRODUCER_ADMISSION_AUTHORITY_V5",
+            "trusted_replay_security_contract_pass": True,
             "canonical_reference_replay_pass": True,
             "final_holdout_accessed": False,
             "strategy_retuned": False,
@@ -104,10 +105,11 @@ class ConfigTests(unittest.TestCase):
                     self.assertFalse(runtime.producer_execution_admitted())
                     self.assertFalse(runtime.demo_execution_enabled(cfg))
 
-    def test_v5_authority_requires_clean_reference_holdout_and_retune_flags(self):
+    def test_v5_authority_requires_clean_reference_replay_contract_holdout_and_retune_flags(self):
         with mock.patch.object(runtime, "CAUSAL_R6_PRODUCER_READY", True):
             for field, value in (
                 ("canonical_reference_replay_pass", False),
+                ("trusted_replay_security_contract_pass", False),
                 ("final_holdout_accessed", True),
                 ("strategy_retuned", True),
             ):
