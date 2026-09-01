@@ -76,8 +76,8 @@ The producer chain is deliberately fail-closed:
 4. **Parity evidence** — requires zero selection/priority/geometry/lot/timestamp mismatches, zero lookahead violations and zero retired-source emissions.
 5. **Canonical reference replay authority** — independently regenerates the reference stream from the exact canonical R6 source. A supplied/self-authored reference stream is not authority.
 6. **Producer Admission Authority V5** — requires canonical-reference replay, candidate replay/parity, and the exact current V4 replay-security contract. It rejects a downgraded replay version, disabled process isolation, changed resource limits, missing worker hash, or weakened source-policy guard.
-7. **Candidate Seal V3** — re-runs V5 admission in an isolated baseline copy and records hashes for the producer, fixtures, producer replay, canonical reference stream, canonical reference replay attestation and producer stream.
-8. **Fused-release Precheck V3** — verifies the locked baseline, freshly reseals the candidate and requires the supplied V3 seal to match. PASS only means eligibility for a separate successor fused-build step.
+7. **Candidate Seal V4** — re-runs V5 admission in an isolated baseline copy, explicitly embeds the trusted replay security contract, and records hashes for the producer, fixtures, producer replay, canonical reference stream, canonical reference replay attestation and producer stream.
+8. **Fused-release Precheck V4** — verifies the locked baseline, rejects legacy V3 seals, freshly reseals the candidate, and requires the supplied V4 seal—including its worker/security contract—to match. PASS only means eligibility for a separate successor fused-build step.
 
 The replay worker is part of the exact `r7_runtime/**/*.py` integrity path set, so replacing it invalidates package integrity. The process boundary plus wall timeout protects the verifier from candidate operations that could evade Python line tracing; these controls are still not claimed to be a perfect OS sandbox against a hostile machine owner.
 
