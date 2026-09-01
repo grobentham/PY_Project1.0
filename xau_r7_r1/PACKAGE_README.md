@@ -114,7 +114,9 @@ A legacy V4 `ready=true` result cannot unlock execution.
 
 Every packaged invocation verifies inherited R6 files, protected R6 files, the exact R7 runtime Python set, launcher and producer operator toolkit hashes before mutable state is used.
 
-`BUILD_R7_R1.ps1` compiles, unit-tests and integrity-checks before ZIP creation and repeats verification after clean extraction. The builder intentionally emits a **producer-locked baseline**.
+`BUILD_R7_R1.ps1` now performs a mandatory **canonical frozen-source build preflight** against the exact R6 ZIP before it can report PASS. The preflight extracts only the Python dependency closure into the temporary build workspace, verifies the source-bundle/probe engine contract, records a non-sensitive summary in `R7_R1_BUILD_VERIFICATION.json`, and requires `strategy_executed=false`, `strategy_retuned=false`, `final_holdout_accessed=false`, and `producer_admitted=false`. The temporary extracted source is removed with the build workspace and is not packaged as a new source copy.
+
+The builder then compiles, unit-tests and integrity-checks before ZIP creation and repeats verification after clean extraction. Clean extraction also requires the packaged build-verification record to contain canonical-source preflight PASS evidence bound to the canonical R6 SHA-256. The builder intentionally emits a **producer-locked baseline**.
 
 Producer sealing/precheck evidence is preparation for a separately audited successor release. It is never a post-build patch or trading unlock mechanism.
 
