@@ -134,6 +134,17 @@ class ConfigTests(unittest.TestCase):
 
 class PackageIntegrityTests(unittest.TestCase):
     @staticmethod
+    def extract_wrapper_text() -> str:
+        return "\n".join((
+            "R7_R1_R6_SOURCE_BUNDLE_V4",
+            "R7_R1_R6_SOURCE_PROBE_V2",
+            "prohibited_source_paths_allowed",
+            "owned_output_replacement_only",
+            "ownership_marker_sha256",
+            ".R7_R1_SOURCE_BUNDLE_OWNERSHIP.json",
+        )) + "\n"
+
+    @staticmethod
     def seal_wrapper_text() -> str:
         return "\n".join((
             "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
@@ -158,6 +169,8 @@ class PackageIntegrityTests(unittest.TestCase):
         )) + "\n"
 
     def operator_text(self, rel: str) -> str:
+        if rel == "EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1":
+            return self.extract_wrapper_text()
         if rel == "SEAL_R6_PRODUCER_CANDIDATE.ps1":
             return self.seal_wrapper_text()
         if rel == "PRECHECK_R6_FUSED_RELEASE.ps1":
@@ -226,24 +239,43 @@ class PackageIntegrityTests(unittest.TestCase):
             self.assertEqual(result["r7_runtime_code_files"], 2)
             self.assertEqual(result["r7_operator_tool_files"], len(REQUIRED_R7_OPERATOR_FILES))
             self.assertTrue(result["operator_authority_contract_pass"])
-            self.assertEqual(
-                result["operator_authority_contract"]["operator_authority_contract_version"],
-                OPERATOR_AUTHORITY_CONTRACT_VERSION,
+            contract = result["operator_authority_contract"]
+            self.assertEqual(contract["operator_authority_contract_version"], OPERATOR_AUTHORITY_CONTRACT_VERSION)
+            self.assertEqual(contract["source_bundle_version"], "R7_R1_R6_SOURCE_BUNDLE_V4")
+            self.assertTrue(contract["source_owned_output_replacement_required"])
+            self.assertTrue(contract["source_prohibited_paths_blocked"])
+            self.assertTrue(contract["legacy_v3_rejected"])
+
+    def test_hash_consistent_v3_extract_wrapper_is_still_rejected_semantically(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            rel = "EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1"
+            (root / rel).write_text(
+                self.extract_wrapper_text().replace("R7_R1_R6_SOURCE_BUNDLE_V4", "R7_R1_R6_SOURCE_BUNDLE_V3"),
+                encoding="utf-8",
             )
-            self.assertTrue(result["operator_authority_contract"]["legacy_v3_rejected"])
+            self.rehash_operator(root, rel)
+            with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_EXTRACT_AUTHORITY_TOKEN_MISSING|R7_OPERATOR_LEGACY_AUTHORITY_TOKEN_PRESENT"):
+                verify_runtime_package_integrity(root)
+
+    def test_hash_consistent_extract_safety_removal_is_rejected_semantically(self):
+        for token in ("prohibited_source_paths_allowed", "owned_output_replacement_only", "ownership_marker_sha256"):
+            with self.subTest(token=token), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                self.build_fake_package(root)
+                rel = "EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1"
+                (root / rel).write_text(self.extract_wrapper_text().replace(token, "removed_" + token), encoding="utf-8")
+                self.rehash_operator(root, rel)
+                with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_EXTRACT_AUTHORITY_TOKEN_MISSING"):
+                    verify_runtime_package_integrity(root)
 
     def test_hash_consistent_v3_seal_wrapper_is_still_rejected_semantically(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             self.build_fake_package(root)
             rel = "SEAL_R6_PRODUCER_CANDIDATE.ps1"
-            (root / rel).write_text(
-                self.seal_wrapper_text().replace(
-                    "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
-                    "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3",
-                ),
-                encoding="utf-8",
-            )
+            (root / rel).write_text(self.seal_wrapper_text().replace("R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4", "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3"), encoding="utf-8")
             self.rehash_operator(root, rel)
             with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_SEAL_AUTHORITY_TOKEN_MISSING|R7_OPERATOR_LEGACY_AUTHORITY_TOKEN_PRESENT"):
                 verify_runtime_package_integrity(root)
@@ -253,13 +285,7 @@ class PackageIntegrityTests(unittest.TestCase):
             root = Path(td)
             self.build_fake_package(root)
             rel = "PRECHECK_R6_FUSED_RELEASE.ps1"
-            (root / rel).write_text(
-                self.precheck_wrapper_text().replace(
-                    "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4",
-                    "R7_R1_R6_FUSED_RELEASE_PRECHECK_V3",
-                ),
-                encoding="utf-8",
-            )
+            (root / rel).write_text(self.precheck_wrapper_text().replace("R7_R1_R6_FUSED_RELEASE_PRECHECK_V4", "R7_R1_R6_FUSED_RELEASE_PRECHECK_V3"), encoding="utf-8")
             self.rehash_operator(root, rel)
             with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_PRECHECK_AUTHORITY_TOKEN_MISSING|R7_OPERATOR_LEGACY_AUTHORITY_TOKEN_PRESENT"):
                 verify_runtime_package_integrity(root)
