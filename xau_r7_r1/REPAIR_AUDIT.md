@@ -4,11 +4,11 @@
 
 **R7-R1 hardened runtime repair: COMPLETE for the implemented broker/risk/state/containment scope.**
 
-The repaired runtime has no known open Critical/High/Medium defect from the adversarial runtime audit. The verified CI matrix covers Linux/Python 3.9, 3.11 and 3.13 plus Windows/Python 3.11. Windows also parses the release/source/producer PowerShell tools and exercises the `msvcrt` single-instance-lock path.
+The repaired runtime has no known open Critical/High/Medium broker/risk/state/containment defect from the current adversarial repair program. The verified CI matrix covers Linux/Python 3.9, 3.11 and 3.13 plus Windows/Python 3.11. Windows parses the release/source/producer PowerShell tools, semantically checks their authority contracts, and exercises the `msvcrt` single-instance-lock path.
 
-The producer-verification authority is now **V5**. It combines canonical source-bundle/probe provenance, isolated/resource-bounded trusted candidate replay V4, parity evidence and independent canonical-reference replay. Candidate Seal V4 and Fused-release Precheck V4 both require that V5 authority.
+The producer-verification authority is **V5**. It combines Source Bundle V4 / Source Probe V2 provenance, isolated/resource-bounded trusted candidate replay V4, parity evidence and independent canonical-reference replay. Candidate Seal V4 and Fused-release Precheck V4 both require that V5 authority.
 
-This closure does **not** claim autonomous R6 trading is implemented. `CAUSAL_R6_PRODUCER_READY` remains hard-frozen to `False`. The actual source-derived causal producer and canonical reference executor are not implemented/admitted, R6 is not retuned, and Final Holdout remains untouched.
+This closure does **not** claim autonomous R6 trading is implemented. `CAUSAL_R6_PRODUCER_READY` remains hard-frozen to `False`. The actual exact source-derived causal producer and canonical-reference executor are not implemented/admitted, R6 is not retuned, and Final Holdout remains untouched.
 
 ## Canonical parent
 
@@ -32,19 +32,24 @@ This closure does **not** claim autonomous R6 trading is implemented. `CAUSAL_R6
 - Final Holdout access NO.
 - Strategy retuning NONE.
 
-## Closed runtime defects
+## Closed runtime/software defects
 
 | Area | Repair |
 |---|---|
-| Parent identity | Builder pins exact canonical R6 ZIP SHA and refuses mismatch. |
+| Parent identity | Builder pins the exact canonical R6 ZIP SHA and refuses mismatch. |
 | Strategy preservation | Inherited parent tree and protected R6 strategy/policy files are hash verified. |
 | Runtime integrity | Exact R7 Python path set, launcher and operator toolkit are hash covered; untracked runtime Python fails closed. |
-| Protected path ambiguity | Verification uses exact manifest paths, so extracted source-workspace shadow copies cannot confuse protected-file resolution. |
-| Canonical source build proof | Release builder extracts the exact frozen Python dependency closure into a temporary workspace and AST-validates the required R5/R6 engine contract before PASS; source is not executed, retuned, or packaged as a new copy. |
-| Producer certification runaway | Trusted replay V4 executes the candidate in a separate hash-covered worker process with a 60-second wall timeout, 1,000,000 Python call/line-event budget, bounded source/fixture/input/range/output sizes, and rejects `while` loops. |
-| Replay budget interception | Candidate `try/except`/`try*`, executable decorators/annotations, mutable top-level state and mutable/executable defaults are rejected, preventing candidate code from swallowing verifier budget exceptions or executing hidden module-definition state. |
-| Replay downgrade | V5 authority and runtime independently require the current V4 replay/source-policy contract, process isolation, worker hash and exact resource limits; downgraded V3/V4-generic evidence cannot unlock execution. |
-| Seal/precheck downgrade | Candidate Seal V4 explicitly carries the replay-security contract; Fused-release Precheck V4 rejects legacy V3 seals and requires the supplied/fresh worker-security contracts to match exactly. |
+| Operator semantic integrity | Operator wrappers are checked for current authority semantics in addition to hashes; a stale wrapper with a recomputed stale manifest hash cannot pass. |
+| Protected path ambiguity | Verification uses exact manifest paths, so source-workspace shadow copies cannot confuse protected-file resolution. |
+| Canonical source build proof | Build Source Preflight V2 requires Source Bundle V4 + Source Probe V2, exact parent identity, source-only dependency closure, engine-contract proof, prohibited-path blocking and owned-output-only replacement before PASS. |
+| Source-path leakage | Source Bundle V4 rejects validation/Holdout/research-result dependency paths instead of extracting them into producer evidence. |
+| Dynamic-import ambiguity | Direct, aliased and reflective dynamic-import constructions fail closed. |
+| Unsafe output replacement | Source extraction never recursively deletes an arbitrary existing output folder; replacement requires its exact valid extractor ownership marker. Symlink/unowned/corrupt-marker outputs are rejected. |
+| Producer certification runaway | Trusted Replay V4 executes the candidate in a separate hash-covered worker process with a 60-second wall timeout, 1,000,000 Python call/line-event budget, bounded source/fixture/input/range/output sizes, and rejects `while` loops. |
+| Replay budget interception | Candidate `try/except`/`try*`, executable decorators/annotations, mutable top-level state and mutable/executable defaults are rejected. |
+| Replay downgrade | V5 authority and runtime require current Replay V4/Source Policy V4, process isolation, worker hash and exact resource limits. |
+| Seal/precheck downgrade | Seal V4 carries the replay-security contract; Precheck V4 rejects V3 seals and requires supplied/fresh worker-security contracts to match. |
+| Builder downgrade | `BUILD_R7_R1.ps1` pins Build Preflight V2 / Source Bundle V4 / Source Probe V2 before packaging and after clean extraction; CI statically rejects V1/V3 regression. |
 | Persistent state | SQLite WAL + `synchronous=FULL`, transactional state/audit writes and semantic ledger replay. |
 | State tampering | Deleted/injected intents/state/tickets, payload mutation and audit discontinuity fail closed. |
 | Idempotency | Transactional local payload identity plus broker magic/comment duplicate reconciliation. |
@@ -56,46 +61,58 @@ This closure does **not** claim autonomous R6 trading is implemented. `CAUSAL_R6
 | Actual fill | ACK requires exact side/full volume/SL/TP and actual-fill stop-risk verification. |
 | Partial/asynchronous fill | `PLACED`/`DONE_PARTIAL`, pending remainder or unstable DEAL-only state never ACK. |
 | Containment | Unsafe/ambiguous R7-owned exposure is cancelled/flattened without touching unrelated XAU exposure. |
-| Crash recovery | `SUBMITTING` persisted before send; restart reconciles and never auto-resubmits ambiguity. |
+| Crash recovery | `SUBMITTING` is persisted before send; restart reconciles and never auto-resubmits ambiguity. |
 | Manual review | Persistent pause requires explicit acknowledgement, zero XAU exposure and zero in-flight intent to clear. |
 | Raw intent bypass | Raw/manual intents are diagnostic-only and use an ephemeral audit store. |
 | Launcher bypass | One launcher only; no raw-send or executable legacy-R6 path. |
 
 ## Producer provenance authority
 
-### Source Bundle V3
+### Source Bundle V4
 
-The canonical-source extractor:
+`R7_R1_R6_SOURCE_BUNDLE_V4` is the current canonical-source extractor contract. It:
 
 - requires the exact canonical R6 ZIP SHA;
-- extracts the protected R5/R6 Python entry sources plus archive-local Python dependency closure;
+- extracts protected R5/R6 Python entry sources plus archive-local Python dependency closure;
 - requires relative/local imports to resolve;
-- rejects duplicate ZIP members, path traversal, symlinks, unsafe sizes and dynamic imports;
-- records non-archive dependencies explicitly;
-- excludes research/outcome/Holdout data.
+- rejects duplicate ZIP members, traversal/unsafe paths, symlinks, unsafe sizes and non-UTF-8 protected source;
+- rejects direct, aliased and reflective dynamic imports;
+- rejects prohibited validation/Holdout/research-result source dependencies before output is admitted;
+- records true non-archive dependencies instead of falsely extracting them;
+- writes an ownership marker for its output workspace;
+- allows replacement only when the existing directory carries the exact valid ownership marker;
+- refuses to delete unowned, symlinked or corrupt-marker output locations;
+- reports strategy execution false, strategy retuning false, Final Holdout access false and producer admission false.
 
-### Build source preflight V1
+Regression coverage includes prohibited local dependencies, aliased/reflective dynamic imports, unsafe archive members, unresolved local helpers, output symlinks, unowned directories, corrupt ownership markers and safe replacement of genuinely owned output.
 
-`R7_R1_CANONICAL_SOURCE_BUILD_PREFLIGHT_V1` is part of the release build gate. `BUILD_R7_R1.ps1` must successfully run the source-bundle extractor and source probe against the exact supplied canonical R6 ZIP before package creation.
+### Build Source Preflight V2
 
-The build preflight requires:
+`R7_R1_CANONICAL_SOURCE_BUILD_PREFLIGHT_V2` is the release-build source authority. It requires:
 
-- canonical parent SHA match;
+- exact canonical-parent SHA;
+- `R7_R1_R6_SOURCE_BUNDLE_V4`;
+- `R7_R1_R6_SOURCE_PROBE_V2`;
 - source-only extraction;
-- local Python dependency closure verified;
+- archive-local Python dependency closure verified;
+- required local imports resolved;
+- dynamic imports disabled;
 - required frozen engine contract present;
+- prohibited source paths blocked;
+- owned-output-only replacement proven;
+- a valid extractor ownership-marker SHA-256;
 - strategy execution false;
 - strategy retuning false;
 - Final Holdout access false;
 - producer admission false.
 
-Only a non-sensitive summary and required-source hashes are written to `R7_R1_BUILD_VERIFICATION.json`. The normalized source/probe workspace stays under the GUID-named temporary build directory and is deleted by builder cleanup. Clean extraction then requires the packaged build-verification record to carry source-preflight PASS evidence bound to the canonical R6 SHA.
+The builder now pins these exact V2/V4/V2 versions and safety fields. `R7_R1_BUILD_VERIFICATION.json` records top-level source-preflight/bundle/probe versions, prohibited-path proof, owned-output proof and the nested preflight evidence. Clean extraction rechecks those same fields plus canonical-parent identity before the package can report PASS.
 
 ### Source Probe V2
 
 Without importing or executing frozen strategy code, the probe records normalized AST source, function AST hashes, source spans, call dependencies, referenced names, literals and top-level assignments.
 
-### Trusted candidate replay V4 / source policy V4
+### Trusted candidate Replay V4 / Source Policy V4
 
 Candidate `r6_causal_producer.py` replay is deterministic, causal-input constrained, process isolated and resource bounded:
 
@@ -112,48 +129,45 @@ Candidate `r6_causal_producer.py` replay is deterministic, causal-input constrai
 - input depth is capped at 64 and input nodes at 100,000 per fixture;
 - sandbox `range()` is capped at 1,000,000 items;
 - each producer invocation has a 1,000,000 Python call/line trace-event budget;
-- the entire replay runs in a separate Python worker with a hard 60-second wall timeout;
+- replay runs in a separate Python worker with a hard 60-second wall timeout;
 - worker stream/report outputs are size bounded;
-- fixture, producer and worker hashes are rechecked after replay to detect mid-run replacement;
+- fixture, producer and worker hashes are rechecked after replay;
 - supplied producer stream must match independently regenerated bytes.
 
 The isolated worker is part of the package's exact `r7_runtime/**/*.py` hash set. Replacing it invalidates package integrity.
 
-Regression coverage deliberately exercises process timeout, `while` rejection, exception interception rejection, execution-event budget, bounded `range`, mutable-state/default rejection, source-size cap, fixture-count cap and input-depth cap on Linux Python 3.9/3.11/3.13 and Windows Python 3.11.
-
-These controls isolate the verifier from candidate operations that can evade Python line tracing. They are still not claimed as a complete hostile-host/OS sandbox.
+These controls isolate the verifier from candidate operations that can evade Python line tracing. They are not claimed as a complete hostile-host/OS sandbox.
 
 ### Canonical-reference authority — V5
 
-A supplied reference stream is **not** accepted as canonical provenance. `r6_reference_replay.py` must regenerate the reference stream from the exact canonical frozen R6 source bundle and causal fixtures and emit a hash-bound reference replay attestation.
+A supplied reference stream is not accepted as canonical provenance. `r6_reference_replay.py` must regenerate the reference stream from exact canonical frozen source plus causal fixtures and emit a hash-bound reference-replay attestation.
 
-`R7_R1_R6_PRODUCER_ADMISSION_AUTHORITY_V5` now requires:
+`R7_R1_R6_PRODUCER_ADMISSION_AUTHORITY_V5` requires:
 
-- exact source bundle/probe verification;
-- canonical reference replay PASS;
+- Source Bundle V4 / Source Probe V2 verification;
+- prohibited-path, dependency-closure and source-integrity evidence;
+- canonical-reference replay PASS;
 - exact reference stream/fixture/source-bundle hashes tied to parity;
 - trusted candidate replay/parity admission PASS;
 - replay version `R7_R1_R6_PRODUCER_REPLAY_V4`;
 - source policy `R7_R1_R6_PRODUCER_SOURCE_POLICY_V4`;
 - process isolation PASS and a valid worker-module SHA-256;
-- exact wall timeout/resource-limit contract;
+- exact wall-time/resource-limit contract;
 - all no-import/no-state/no-exception/no-lookahead/no-outcome guards intact;
 - Final Holdout access false;
 - strategy retuned false.
 
-The authority emits `trusted_replay_security_contract_pass=true` only after those checks. Runtime execution independently requires that flag in addition to V5 authority and canonical-reference replay.
+Runtime execution independently requires the V5 authority and replay-security-contract PASS in addition to canonical-reference replay.
 
 The production exact-source reference executor is intentionally not implemented yet and fails with:
 
 `CANONICAL_REFERENCE_EXECUTOR_NOT_IMPLEMENTED_FROM_EXACT_R6_SOURCE`
 
-That fail-closed error is the current honest architecture boundary.
+That is the current honest architecture boundary.
 
-## Runtime execution-authority bypass found and closed
+## Runtime execution-authority bypass closed
 
-During the V5 audit, `runtime.py` was found to still import the earlier V4 candidate-admission status. That created a future bypass: if the constitutional readiness Boolean were ever flipped, legacy `ready=true` evidence could potentially satisfy runtime even though Seal/Precheck required V5.
-
-This was repaired. The actual runtime unlock now requires:
+The runtime does not accept older candidate-admission readiness as execution authority. A future readiness switch change would still require:
 
 - `authority_version == R7_R1_R6_PRODUCER_ADMISSION_AUTHORITY_V5`;
 - `ready == true`;
@@ -162,15 +176,15 @@ This was repaired. The actual runtime unlock now requires:
 - Final Holdout access false;
 - strategy retuned false.
 
-Regression tests prove that legacy candidate-admission `ready=true`, downgraded replay version and disabled process-isolation evidence cannot unlock demo execution.
+Regression tests prove that legacy readiness, downgraded replay versions and disabled process isolation cannot unlock demo execution.
 
 ## Candidate Seal V4
 
-`R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4` is generated only after V5 admission passes in an isolated copy. Candidate evidence includes and hash-binds:
+`R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4` is generated only after V5 admission passes in an isolated copy. It hash-binds:
 
 - producer module;
 - source probe;
-- source bundle manifest;
+- Source Bundle V4 manifest;
 - causal fixtures;
 - producer replay attestation;
 - canonical reference stream;
@@ -179,65 +193,65 @@ Regression tests prove that legacy candidate-admission `ready=true`, downgraded 
 - isolation manifest;
 - parity report;
 - `trusted_replay_security_contract_pass=true`;
-- the exact replay/source-policy versions, process-isolation claim, worker SHA-256, wall timeout and replay resource limits.
+- exact replay/source-policy versions, process-isolation claim, worker SHA-256, wall timeout and replay resource limits.
 
-Seal V4 fails closed if replay-security authority is missing, if process isolation is false, if the worker hash is invalid, or if the wall timeout is invalid. This makes replay authority first-class seal evidence instead of leaving it implicit behind the replay-attestation hash.
-
-The seal cannot mutate the locked baseline or unlock execution.
+It cannot mutate the locked baseline or unlock execution.
 
 ## Fused-release Precheck V4
 
 `R7_R1_R6_FUSED_RELEASE_PRECHECK_V4`:
 
 - verifies locked baseline package integrity;
-- rejects legacy V3 seals automatically;
+- rejects legacy V3 seals;
 - validates the supplied V4 replay-security contract;
-- freshly reseals the candidate under current V5 authority;
-- requires all authority-bearing fields and hashes, including the full replay worker/security contract, canonical-reference evidence and replay-attestation evidence, to match;
+- freshly reseals under current V5 authority;
+- requires all authority-bearing hashes and the full replay worker/security contract to match;
 - reports future fused-build eligibility only.
-
-Regression coverage proves that an old V3 seal, a disabled replay-security PASS claim, disabled process isolation, or a stale worker/security-contract hash cannot pass V4 precheck.
 
 It does not integrate code, change `CAUSAL_R6_PRODUCER_READY`, create an execution-enabled package or authorize trading.
 
-## Cross-platform provenance repair
+## Cross-platform provenance / CI
 
-V5 testing exposed an OS-specific JSONL hash issue: Windows `write_text()` newline translation produced CRLF bytes while canonical replay produced LF bytes. Hash-bound canonical reference fixtures now use explicit UTF-8 `write_bytes()` with canonical compact JSONL, making provenance bytes identical across Windows/Linux.
+The supported regression matrix is Linux Python 3.9/3.11/3.13 and Windows Python 3.11. Windows additionally:
 
-The isolated replay V4 and Seal/Precheck V4 paths are exercised on all supported CI lanes, including Windows subprocess/module execution.
+- parses all release/source/certification PowerShell tools;
+- checks builder source-authority tokens for Preflight V2 / Bundle V4 / Probe V2;
+- checks extraction wrapper Source Bundle V4 safety tokens;
+- checks Seal/Precheck V4 replay-security authority tokens;
+- rejects legacy V1/V3 authority references.
+
+Runtime unit coverage also proves that a stale extraction/seal/precheck wrapper cannot become valid merely by recomputing its manifest hash.
 
 ## Execution lock
 
 `CAUSAL_R6_PRODUCER_READY = False` remains part of the R7-R1 constitution and package manifest.
 
-Even in a future successor where that Boolean is deliberately changed, it is not sufficient by itself. Demo execution also requires current V5 authority, trusted replay security-contract PASS, canonical-reference replay PASS, and the explicit config/environment unlocks.
+Even in a future successor where that Boolean is deliberately changed, it is not sufficient by itself. Demo execution also requires current V5 authority, trusted replay security-contract PASS, canonical-reference replay PASS, and explicit config/environment unlocks.
 
-Raw/manual intents can never receive send authority.
+Raw/manual intents can never receive send authority. Real/live-account execution remains prohibited.
 
 ## Remaining implementation boundary
 
-The remaining autonomous-system work is **not another broker-runtime repair**. It is the exact source-derived producer/reference implementation:
+The remaining autonomous-system work is the exact source-derived producer/reference implementation:
 
-1. access the canonical R6 source/dependency bytes;
+1. access exact canonical R6 source/dependency bytes;
 2. implement the exact canonical reference executor without reconstructing behavior from validation/outcome rows;
-3. implement the causal `r6_causal_producer.py` from that same frozen source;
+3. implement causal `r6_causal_producer.py` from the same frozen source;
 4. generate causal fixtures/reference/producer streams;
 5. require zero parity mismatch and V5 admission;
 6. produce V4 seal + V4 precheck;
-7. only then create a separately audited fused successor release.
+7. create a separately audited fused successor release.
 
-The canonical R6 ZIP is available in the project Library, but the current ChatGPT local command/Python backend fails before process start and the file service does not expose ZIP member source. The GitHub connector can download workflow artifacts but cannot upload the materialized private archive into Actions. This tooling limitation is not permission to approximate the strategy or publish canonical strategy IP to the public repository.
-
-The build-source preflight reduces the next release-build uncertainty: once `BUILD_R7_R1.ps1` runs in an environment that can open the canonical ZIP, source-closure readability and frozen-engine structure are mandatory build evidence rather than an unchecked assumption. It does not authorize or synthesize the missing causal executor.
+The canonical R6 ZIP is available in the project Library, but the current ChatGPT process/Python backend has failed before ZIP-member inspection. This tooling limitation is not permission to approximate the strategy or publish canonical strategy IP.
 
 ## Build/release status
 
-`BUILD_R7_R1.ps1` is designed to create and clean-extraction-certify a **producer-locked R7-R1 baseline** while preserving canonical R6 bytes. It packages/hash-covers the producer operator toolkit and requires canonical source-bundle/probe preflight against the exact R6 archive before PASS.
+`BUILD_R7_R1.ps1` is designed to create and clean-extraction-certify a **producer-locked R7-R1 baseline** while preserving canonical R6 bytes. It hash-covers the producer operator toolkit and requires exact Build Preflight V2 / Source Bundle V4 / Source Probe V2 evidence before PASS.
 
 No legitimate producer-enabled fused ZIP has been created yet.
 
 ## Closure rule
 
-The R7-R1 broker/risk/state/containment repair and V5 producer-verification authority are implemented and fail closed.
+The implemented R7-R1 broker/risk/state/containment repair and producer-verification authority are fail-closed.
 
 Do not call the autonomous trading system `SEALED`, `FINAL`, production-ready or live-ready. Do not enable automatic execution until the exact canonical source executor and causal producer are implemented, V5-admitted, V4-sealed, V4-prechecked and incorporated through a separately audited successor build. Real/live-account execution remains prohibited.
