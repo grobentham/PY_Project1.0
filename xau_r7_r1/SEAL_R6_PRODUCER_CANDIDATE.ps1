@@ -15,6 +15,7 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Work = Join-Path ([System.IO.Path]::GetTempPath()) ('XAU_R6_PRODUCER_SEAL_' + [Guid]::NewGuid().ToString('N'))
 $RuntimeStage = Join-Path $Work 'r7_runtime'
 $RequiredSealVersion = 'R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4'
+$RequiredSourceBundleVersion = 'R7_R1_R6_SOURCE_BUNDLE_V4'
 $RequiredReplayVersion = 'R7_R1_R6_PRODUCER_REPLAY_V4'
 $RequiredSourcePolicyVersion = 'R7_R1_R6_PRODUCER_SOURCE_POLICY_V4'
 
@@ -51,6 +52,26 @@ function Assert-PackagedSelfIntegrity($Python) {
         )
     }
     finally { Pop-Location }
+}
+
+function Assert-SourceSecurityContracts($SealObject) {
+    if ($SealObject.source_bundle_security_contract_pass -ne $true) { Fail 'candidate seal did not prove source-bundle security contract' }
+    $source = $SealObject.source_bundle_security_contract
+    if ($null -eq $source) { Fail 'candidate seal missing source-bundle security contract' }
+    if ([string]$source.bundle_version -ne $RequiredSourceBundleVersion) { Fail 'candidate seal source-bundle version mismatch' }
+    foreach ($field in @('static_dependency_closure_recomputed','dynamic_import_policy_recomputed','prohibited_source_paths_blocked','owned_output_replacement_only')) {
+        if ($source.$field -ne $true) { Fail ('candidate seal source-bundle guard not proven: ' + $field) }
+    }
+    $markerHash = [string]$source.ownership_marker_sha256
+    if ($markerHash.Length -ne 64 -or $markerHash -notmatch '^[0-9a-fA-F]{64}$') { Fail 'candidate seal source ownership marker SHA-256 invalid' }
+
+    if ($SealObject.reference_source_security_contract_pass -ne $true) { Fail 'candidate seal did not prove reference source security contract' }
+    $reference = $SealObject.reference_source_security_contract
+    if ($null -eq $reference) { Fail 'candidate seal missing reference source security contract' }
+    if ([string]$reference.source_bundle_version -ne $RequiredSourceBundleVersion) { Fail 'candidate seal reference source-bundle version mismatch' }
+    foreach ($field in @('source_bundle_static_closure_recomputed','source_bundle_dynamic_import_policy_recomputed','source_bundle_prohibited_paths_blocked','reference_generated_by_exact_canonical_source_executor')) {
+        if ($reference.$field -ne $true) { Fail ('candidate seal reference-source guard not proven: ' + $field) }
+    }
 }
 
 function Assert-ReplaySecurityContract($SealObject) {
@@ -108,6 +129,7 @@ try {
     $seal = Get-Content -LiteralPath $Output -Raw | ConvertFrom-Json
     if ($seal.seal_version -ne $RequiredSealVersion) { Fail 'unexpected candidate seal version' }
     if ($seal.admission_ready -ne $true) { Fail 'candidate seal did not prove admission readiness' }
+    Assert-SourceSecurityContracts $seal
     Assert-ReplaySecurityContract $seal
     if ($seal.canonical_reference_replay_pass -ne $true) { Fail 'candidate seal did not prove canonical-reference replay authority' }
     if ([string]::IsNullOrWhiteSpace([string]$seal.authority_version)) { Fail 'candidate seal missing authority_version' }
@@ -129,7 +151,7 @@ try {
     if ($seal.strategy_retuned -ne $false) { Fail 'candidate seal reports strategy retuning' }
 
     Write-Host ''
-    Write-Host '[PASS] R6 causal-producer V4 candidate sealed after V5 canonical-reference authority and isolated replay-security verification.' -ForegroundColor Green
+    Write-Host '[PASS] R6 causal-producer V4 candidate sealed after V5 source provenance, canonical-reference authority and isolated replay-security verification.' -ForegroundColor Green
     Write-Host ('Seal: ' + $Output)
     Write-Host 'The baseline runtime was not modified and execution remains locked.' -ForegroundColor Yellow
 }
