@@ -21,6 +21,30 @@ REQUIRED_R7_OPERATOR_FILES = frozenset({
     "R7_R1_REPAIR_AUDIT.md",
 })
 
+OPERATOR_AUTHORITY_CONTRACT_VERSION = "R7_R1_OPERATOR_AUTHORITY_CONTRACT_V1"
+_REQUIRED_SEAL_WRAPPER_TOKENS = (
+    "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
+    "R7_R1_R6_PRODUCER_REPLAY_V4",
+    "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
+    "trusted_replay_security_contract_pass",
+    "process_isolation_enforced",
+    "worker_module_sha256",
+    "wall_timeout_seconds",
+)
+_REQUIRED_PRECHECK_WRAPPER_TOKENS = (
+    "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4",
+    "R7_R1_R6_PRODUCER_REPLAY_V4",
+    "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
+    "trusted_replay_security_contract_pass",
+    "process_isolation_enforced",
+    "worker_module_sha256",
+    "wall_timeout_seconds",
+)
+_LEGACY_OPERATOR_TOKENS = (
+    "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3",
+    "R7_R1_R6_FUSED_RELEASE_PRECHECK_V3",
+)
+
 
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -175,6 +199,50 @@ def _actual_runtime_code_paths(root: Path) -> set[str]:
     return paths
 
 
+def _read_operator_text(root: Path, relative: str) -> str:
+    path = _resolve_manifest_file(root, relative, "R7_OPERATOR_AUTHORITY")
+    if not path.is_file() or path.is_symlink():
+        raise IntegrityError("R7_OPERATOR_AUTHORITY_FILE_MISSING:" + relative)
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception as exc:
+        raise IntegrityError("R7_OPERATOR_AUTHORITY_FILE_UNREADABLE:" + relative) from exc
+
+
+def verify_operator_authority_contract(root: Path) -> Dict[str, Any]:
+    """Require current certification semantics in addition to manifest-consistent hashes.
+
+    A locally rebuilt package must not become valid merely because a stale V3
+    wrapper and its matching stale hash were written into the same manifest.
+    This semantic contract is checked on every runtime package-integrity pass.
+    """
+    root = Path(root).resolve()
+    seal_text = _read_operator_text(root, "SEAL_R6_PRODUCER_CANDIDATE.ps1")
+    precheck_text = _read_operator_text(root, "PRECHECK_R6_FUSED_RELEASE.ps1")
+
+    for token in _REQUIRED_SEAL_WRAPPER_TOKENS:
+        if token not in seal_text:
+            raise IntegrityError("R7_OPERATOR_SEAL_AUTHORITY_TOKEN_MISSING:" + token)
+    for token in _REQUIRED_PRECHECK_WRAPPER_TOKENS:
+        if token not in precheck_text:
+            raise IntegrityError("R7_OPERATOR_PRECHECK_AUTHORITY_TOKEN_MISSING:" + token)
+    for token in _LEGACY_OPERATOR_TOKENS:
+        if token in seal_text or token in precheck_text:
+            raise IntegrityError("R7_OPERATOR_LEGACY_AUTHORITY_TOKEN_PRESENT:" + token)
+
+    return {
+        "operator_authority_contract_version": OPERATOR_AUTHORITY_CONTRACT_VERSION,
+        "candidate_seal_version": "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
+        "fused_precheck_version": "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4",
+        "producer_replay_version": "R7_R1_R6_PRODUCER_REPLAY_V4",
+        "producer_source_policy_version": "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
+        "replay_security_contract_required": True,
+        "process_isolation_required": True,
+        "worker_hash_required": True,
+        "legacy_v3_rejected": True,
+    }
+
+
 def verify_runtime_package_integrity(root: Path, manifest_path: Optional[Path] = None) -> Dict[str, Any]:
     root = Path(root).resolve()
     manifest_path = manifest_path or root / "R7_R1_PARENT_INTEGRITY.json"
@@ -223,12 +291,15 @@ def verify_runtime_package_integrity(root: Path, manifest_path: Optional[Path] =
             "R7_OPERATOR_TOOL_PATH_SET_MISMATCH:missing=" + ",".join(missing) + ";extra=" + ",".join(extra)
         )
     _verify_hash_map(root, operator_hashes, "R7_OPERATOR_TOOL_HASH_MISMATCH")
+    operator_authority = verify_operator_authority_contract(root)
 
     return {
         "parent_tree_files": len(data.get("parent_tree_sha256", {})),
         "protected_r6_files": len(protected),
         "r7_runtime_code_files": len(r7_hashes),
         "r7_operator_tool_files": len(operator_hashes),
+        "operator_authority_contract": operator_authority,
+        "operator_authority_contract_pass": True,
         "canonical_parent_sha256": CANONICAL_R6_ZIP_SHA256,
         "causal_r6_producer_ready": False,
         "execution_runtime_hard_locked": True,
