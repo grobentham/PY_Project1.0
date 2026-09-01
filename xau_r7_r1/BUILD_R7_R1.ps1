@@ -11,6 +11,7 @@ $OutputSha = $OutputZip + '.sha256'
 $Work = Join-Path ([System.IO.Path]::GetTempPath()) ('XAU_R7_R1_' + [Guid]::NewGuid().ToString('N'))
 $Extract = Join-Path $Work 'package'
 $Verify = Join-Path $Work 'verify'
+$SourcePreflight = Join-Path $Work 'canonical_source_preflight'
 
 $ProtectedSuffixes = @(
     'v16r6/engine.py',
@@ -179,6 +180,24 @@ try {
     $frozenLauncherHash = (Get-FileHash -LiteralPath (Join-Path $FrozenParent 'START_XAU_R6_ORIGINAL.bat.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($frozenLauncherHash -ne $originalLauncherHash) { Fail 'preserved R6 launcher bytes do not match original launcher hash' }
 
+    Push-Location $Extract
+    try {
+        $sourcePreflightRaw = Invoke-PythonCapture $Python @('-m','r7_runtime.r6_build_source_preflight','--zip',$ParentZip,'--output',$SourcePreflight)
+    }
+    finally { Pop-Location }
+    try {
+        $sourcePreflightResult = (($sourcePreflightRaw -join "`n") | ConvertFrom-Json)
+    }
+    catch { Fail ('canonical source preflight returned invalid JSON: ' + $_.Exception.Message) }
+    if ([string]$sourcePreflightResult.canonical_parent_zip_sha256 -ne $CanonicalSha256) { Fail 'canonical source preflight parent SHA mismatch' }
+    if ($sourcePreflightResult.source_only_bundle_verified -ne $true) { Fail 'canonical source preflight did not prove source-only extraction' }
+    if ($sourcePreflightResult.dependency_closure_verified -ne $true) { Fail 'canonical source preflight did not prove dependency closure' }
+    if ($sourcePreflightResult.required_engine_contract_verified -ne $true) { Fail 'canonical source preflight did not prove frozen engine contract' }
+    if ($sourcePreflightResult.strategy_executed -ne $false) { Fail 'canonical source preflight unexpectedly executed strategy logic' }
+    if ($sourcePreflightResult.strategy_retuned -ne $false) { Fail 'canonical source preflight reports strategy retuning' }
+    if ($sourcePreflightResult.final_holdout_accessed -ne $false) { Fail 'canonical source preflight reports Final Holdout access' }
+    if ($sourcePreflightResult.producer_admitted -ne $false) { Fail 'canonical source preflight unexpectedly admitted producer' }
+
     $r7RuntimeHashes = Get-R7RuntimeCodeHashes $Extract
     $r7OperatorHashes = Get-R7OperatorToolHashes $Extract
     $manifest = [ordered]@{
@@ -217,6 +236,8 @@ try {
         r7_runtime_code_verified = $true
         r7_operator_tools_verified = $true
         original_launcher_preserved = $true
+        canonical_source_preflight_pass = $true
+        canonical_source_preflight = $sourcePreflightResult
         python_compile_pass = $true
         unit_tests_pass = $true
         offline_runtime_integrity_pass = $true
@@ -226,7 +247,7 @@ try {
         final_holdout_accessed = $false
         strategy_retuned = $false
     }
-    Write-Utf8NoBom (Join-Path $Extract 'R7_R1_BUILD_VERIFICATION.json') ($verification | ConvertTo-Json -Depth 8)
+    Write-Utf8NoBom (Join-Path $Extract 'R7_R1_BUILD_VERIFICATION.json') ($verification | ConvertTo-Json -Depth 12)
 
     $stateDir = Join-Path $Extract 'r7_runtime_state'
     if (Test-Path -LiteralPath $stateDir) { Remove-Item -LiteralPath $stateDir -Recurse -Force }
@@ -249,6 +270,11 @@ try {
     Verify-HashMap $Verify $verifyManifest.r7_operator_tool_sha256 'extracted R7 operator tool'
     $verifyFrozenHash = (Get-FileHash -LiteralPath (Join-Path $Verify 'r7_runtime\frozen_parent\START_XAU_R6_ORIGINAL.bat.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($verifyFrozenHash -ne [string]$verifyManifest.original_start_xau_sha256) { Fail 'extracted ZIP frozen launcher hash mismatch' }
+    $verifyBuild = Get-Content -LiteralPath (Join-Path $Verify 'R7_R1_BUILD_VERIFICATION.json') -Raw | ConvertFrom-Json
+    if ($verifyBuild.canonical_source_preflight_pass -ne $true) { Fail 'extracted ZIP lacks canonical source preflight PASS evidence' }
+    if ([string]$verifyBuild.canonical_source_preflight.canonical_parent_zip_sha256 -ne $CanonicalSha256) { Fail 'extracted ZIP source preflight parent SHA mismatch' }
+    if ($verifyBuild.canonical_source_preflight.final_holdout_accessed -ne $false) { Fail 'extracted ZIP source preflight reports Final Holdout access' }
+    if ($verifyBuild.canonical_source_preflight.strategy_retuned -ne $false) { Fail 'extracted ZIP source preflight reports strategy retuning' }
 
     Push-Location $Verify
     try {
