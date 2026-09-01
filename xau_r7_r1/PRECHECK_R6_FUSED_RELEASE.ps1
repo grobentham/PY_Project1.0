@@ -17,6 +17,7 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Work = Join-Path ([System.IO.Path]::GetTempPath()) ('XAU_R6_FUSED_PRECHECK_' + [Guid]::NewGuid().ToString('N'))
 $RuntimeStage = Join-Path $Work 'r7_runtime'
 $RequiredPrecheckVersion = 'R7_R1_R6_FUSED_RELEASE_PRECHECK_V4'
+$RequiredSourceBundleVersion = 'R7_R1_R6_SOURCE_BUNDLE_V4'
 $RequiredReplayVersion = 'R7_R1_R6_PRODUCER_REPLAY_V4'
 $RequiredSourcePolicyVersion = 'R7_R1_R6_PRODUCER_SOURCE_POLICY_V4'
 
@@ -53,6 +54,26 @@ function Assert-PackagedSelfIntegrity($Python) {
         )
     }
     finally { Pop-Location }
+}
+
+function Assert-SourceSecurityContracts($ReportObject) {
+    if ($ReportObject.source_bundle_security_contract_pass -ne $true) { Fail 'precheck did not prove source-bundle security contract' }
+    $source = $ReportObject.source_bundle_security_contract
+    if ($null -eq $source) { Fail 'precheck missing source-bundle security contract' }
+    if ([string]$source.bundle_version -ne $RequiredSourceBundleVersion) { Fail 'precheck source-bundle version mismatch' }
+    foreach ($field in @('static_dependency_closure_recomputed','dynamic_import_policy_recomputed','prohibited_source_paths_blocked','owned_output_replacement_only')) {
+        if ($source.$field -ne $true) { Fail ('precheck source-bundle guard not proven: ' + $field) }
+    }
+    $markerHash = [string]$source.ownership_marker_sha256
+    if ($markerHash.Length -ne 64 -or $markerHash -notmatch '^[0-9a-fA-F]{64}$') { Fail 'precheck source ownership marker SHA-256 invalid' }
+
+    if ($ReportObject.reference_source_security_contract_pass -ne $true) { Fail 'precheck did not prove reference source security contract' }
+    $reference = $ReportObject.reference_source_security_contract
+    if ($null -eq $reference) { Fail 'precheck missing reference source security contract' }
+    if ([string]$reference.source_bundle_version -ne $RequiredSourceBundleVersion) { Fail 'precheck reference source-bundle version mismatch' }
+    foreach ($field in @('source_bundle_static_closure_recomputed','source_bundle_dynamic_import_policy_recomputed','source_bundle_prohibited_paths_blocked','reference_generated_by_exact_canonical_source_executor')) {
+        if ($reference.$field -ne $true) { Fail ('precheck reference-source guard not proven: ' + $field) }
+    }
 }
 
 function Assert-ReplaySecurityContract($ReportObject) {
@@ -122,6 +143,7 @@ try {
     if ($report.baseline_execution_hard_locked -ne $true) { Fail 'baseline execution is not hard-locked' }
     if ($report.fresh_seal_matches_supplied_seal -ne $true) { Fail 'fresh V4 seal does not match supplied V4 seal' }
     if ($report.candidate_admission_ready -ne $true) { Fail 'candidate admission is not ready' }
+    Assert-SourceSecurityContracts $report
     Assert-ReplaySecurityContract $report
     if ($report.canonical_reference_replay_pass -ne $true) { Fail 'canonical-reference replay authority did not pass' }
     if ([string]::IsNullOrWhiteSpace([string]$report.authority_version)) { Fail 'precheck missing authority_version' }
@@ -140,7 +162,7 @@ try {
     if ($report.successor_release_required -ne $true) { Fail 'precheck must require a separate successor release' }
 
     Write-Host ''
-    Write-Host '[PASS] V4-sealed R6 producer candidate passed V5 canonical-reference authority and isolated replay-security precheck.' -ForegroundColor Green
+    Write-Host '[PASS] V4-sealed R6 producer candidate passed V5 source provenance, canonical-reference authority and isolated replay-security precheck.' -ForegroundColor Green
     Write-Host ('Precheck: ' + $Output)
     Write-Host 'No code was integrated, no readiness switch was changed, and execution remains locked.' -ForegroundColor Yellow
 }
