@@ -260,14 +260,19 @@ class PackageIntegrityTests(unittest.TestCase):
                 verify_runtime_package_integrity(root)
 
     def test_hash_consistent_extract_safety_removal_is_rejected_semantically(self):
-        for token in ("prohibited_source_paths_allowed", "owned_output_replacement_only", "ownership_marker_sha256"):
+        replacement = {
+            "prohibited_source_paths_allowed": "SOURCE_PATH_GUARD_REMOVED",
+            "owned_output_replacement_only": "OUTPUT_OWNERSHIP_GUARD_REMOVED",
+            "ownership_marker_sha256": "OWNERSHIP_MARKER_HASH_REMOVED",
+        }
+        for token, removed in replacement.items():
             with self.subTest(token=token), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 self.build_fake_package(root)
                 rel = "EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1"
-                (root / rel).write_text(self.extract_wrapper_text().replace(token, "removed_" + token), encoding="utf-8")
+                (root / rel).write_text(self.extract_wrapper_text().replace(token, removed), encoding="utf-8")
                 self.rehash_operator(root, rel)
-                with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_EXTRACT_AUTHORITY_TOKEN_MISSING"):
+                with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_EXTRACT_AUTHORITY_TOKEN_MISSING:" + token):
                     verify_runtime_package_integrity(root)
 
     def test_hash_consistent_v3_seal_wrapper_is_still_rejected_semantically(self):
