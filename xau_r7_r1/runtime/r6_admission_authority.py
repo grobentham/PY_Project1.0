@@ -21,6 +21,7 @@ from .r6_reference_replay import (
     ReferenceReplayError,
     verify_reference_replay_evidence,
 )
+from .r6_source_bundle import BUNDLE_VERSION
 
 
 class ProducerAdmissionAuthorityError(RuntimeError):
@@ -100,6 +101,38 @@ def _verify_trusted_replay_security_contract(candidate: Dict[str, Any]) -> Dict[
     }
 
 
+def _verify_source_bundle_security_contract(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    source_bundle = candidate.get("source_bundle")
+    if not isinstance(source_bundle, dict):
+        raise ProducerAdmissionAuthorityError("SOURCE_BUNDLE_SECURITY_CONTRACT_MISSING")
+    if source_bundle.get("bundle_version") != BUNDLE_VERSION:
+        raise ProducerAdmissionAuthorityError("SOURCE_BUNDLE_SECURITY_VERSION_MISMATCH")
+    required_true = (
+        "static_dependency_closure_recomputed",
+        "dynamic_import_policy_recomputed",
+        "prohibited_source_paths_blocked",
+        "owned_output_replacement_only",
+    )
+    for key in required_true:
+        if source_bundle.get(key) is not True:
+            raise ProducerAdmissionAuthorityError("SOURCE_BUNDLE_REQUIRED_GUARD_MISSING:" + key)
+    marker_hash = source_bundle.get("ownership_marker_sha256")
+    if not isinstance(marker_hash, str) or len(marker_hash) != 64:
+        raise ProducerAdmissionAuthorityError("SOURCE_BUNDLE_OWNERSHIP_MARKER_HASH_INVALID")
+    try:
+        int(marker_hash, 16)
+    except ValueError as exc:
+        raise ProducerAdmissionAuthorityError("SOURCE_BUNDLE_OWNERSHIP_MARKER_HASH_INVALID") from exc
+    return {
+        "bundle_version": BUNDLE_VERSION,
+        "static_dependency_closure_recomputed": True,
+        "dynamic_import_policy_recomputed": True,
+        "prohibited_source_paths_blocked": True,
+        "owned_output_replacement_only": True,
+        "ownership_marker_sha256": marker_hash.lower(),
+    }
+
+
 def verify_producer_admission(
     root: Path,
     *,
@@ -107,11 +140,11 @@ def verify_producer_admission(
 ) -> Dict[str, Any]:
     """Authoritative producer admission.
 
-    Candidate admission proves the candidate module generated its producer
-    stream and matches a supplied reference stream. V5 adds two independent
-    authority boundaries: the reference stream must be regenerated from exact
-    canonical frozen R6 source, and candidate replay must satisfy the current
-    isolated/resource-bounded replay security contract. Production remains
+    V5 requires three independent authority boundaries: the reference stream
+    must be regenerated from exact canonical frozen R6 source, candidate replay
+    must satisfy the current isolated/resource-bounded replay contract, and the
+    candidate's Source Bundle V4 claims must have been independently recomputed
+    from canonical parent bytes by lower-level admission. Production remains
     fail-closed while the exact-source reference executor is unavailable.
     """
     root = Path(root).resolve()
@@ -145,6 +178,7 @@ def verify_producer_admission(
     if candidate.get("strategy_retuned") is not False:
         raise ProducerAdmissionAuthorityError("V4_CANDIDATE_RETUNING_BREACH")
 
+    source_bundle_contract = _verify_source_bundle_security_contract(candidate)
     replay_contract = _verify_trusted_replay_security_contract(candidate)
 
     parity = candidate.get("parity")
@@ -161,6 +195,8 @@ def verify_producer_admission(
         **candidate,
         "authority_version": AUTHORITY_VERSION,
         "ready": True,
+        "source_bundle_security_contract": source_bundle_contract,
+        "source_bundle_security_contract_pass": True,
         "trusted_replay_security_contract": replay_contract,
         "trusted_replay_security_contract_pass": True,
         "canonical_reference_replay": reference,
@@ -179,6 +215,7 @@ def producer_admission_status(root: Path) -> Dict[str, Any]:
             "authority_version": AUTHORITY_VERSION,
             "ready": False,
             "reason": str(exc),
+            "source_bundle_security_contract_pass": False,
             "trusted_replay_security_contract_pass": False,
             "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
             "canonical_reference_replay_pass": False,
