@@ -26,6 +26,7 @@ from r7_runtime.r6_producer_seal import (
     ProducerSealError,
     seal_candidate,
 )
+from r7_runtime.r6_source_bundle import BUNDLE_VERSION
 
 
 class ProducerSealTests(unittest.TestCase):
@@ -75,15 +76,43 @@ class ProducerSealTests(unittest.TestCase):
             "max_execution_line_events": MAX_EXECUTION_LINE_EVENTS,
         }
 
+    @staticmethod
+    def source_bundle_contract():
+        return {
+            "bundle_version": BUNDLE_VERSION,
+            "static_dependency_closure_recomputed": True,
+            "dynamic_import_policy_recomputed": True,
+            "prohibited_source_paths_blocked": True,
+            "owned_output_replacement_only": True,
+            "ownership_marker_sha256": "b" * 64,
+        }
+
+    @staticmethod
+    def reference_source_contract():
+        return {
+            "source_bundle_version": BUNDLE_VERSION,
+            "source_bundle_static_closure_recomputed": True,
+            "source_bundle_dynamic_import_policy_recomputed": True,
+            "source_bundle_prohibited_paths_blocked": True,
+            "reference_generated_by_exact_canonical_source_executor": True,
+        }
+
     def admission(self):
         return {
             "admission_version": "TEST_ADMISSION_V4",
             "authority_version": "TEST_AUTHORITY_V5",
             "ready": True,
+            "reference_source_security_contract_pass": True,
+            "reference_source_security_contract": self.reference_source_contract(),
+            "source_bundle_security_contract_pass": True,
+            "source_bundle_security_contract": self.source_bundle_contract(),
             "trusted_replay_security_contract_pass": True,
             "trusted_replay_security_contract": self.security_contract(),
             "canonical_reference_replay_pass": True,
             "canonical_reference_replay": {
+                "source_bundle_static_closure_recomputed": True,
+                "source_bundle_dynamic_import_policy_recomputed": True,
+                "source_bundle_prohibited_paths_blocked": True,
                 "reference_generated_by_exact_canonical_source_executor": True,
                 "final_holdout_accessed": False,
                 "strategy_retuned": False,
@@ -117,6 +146,10 @@ class ProducerSealTests(unittest.TestCase):
                 result = seal_candidate(base, candidate)
             self.assertEqual(result["seal_version"], SEAL_VERSION)
             self.assertTrue(result["admission_ready"])
+            self.assertTrue(result["reference_source_security_contract_pass"])
+            self.assertEqual(result["reference_source_security_contract"], self.reference_source_contract())
+            self.assertTrue(result["source_bundle_security_contract_pass"])
+            self.assertEqual(result["source_bundle_security_contract"], self.source_bundle_contract())
             self.assertTrue(result["trusted_replay_security_contract_pass"])
             self.assertEqual(result["trusted_replay_security_contract"], self.security_contract())
             self.assertTrue(result["canonical_reference_replay_pass"])
@@ -168,6 +201,31 @@ class ProducerSealTests(unittest.TestCase):
                 with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_ADMISSION_FAILED:CANONICAL_REFERENCE_REPLAY_FAILED"):
                     seal_candidate(base, candidate)
 
+    def test_missing_source_bundle_security_contract_cannot_be_sealed(self):
+        with tempfile.TemporaryDirectory() as td:
+            base, candidate = self.make_roots(td)
+            bad = self.admission(); bad["source_bundle_security_contract_pass"] = False
+            with mock.patch("r7_runtime.r6_producer_seal.verify_producer_admission", return_value=bad):
+                with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_SOURCE_BUNDLE_SECURITY_CONTRACT_NOT_PROVEN"):
+                    seal_candidate(base, candidate)
+
+    def test_missing_reference_source_security_contract_cannot_be_sealed(self):
+        with tempfile.TemporaryDirectory() as td:
+            base, candidate = self.make_roots(td)
+            bad = self.admission(); bad["reference_source_security_contract_pass"] = False
+            with mock.patch("r7_runtime.r6_producer_seal.verify_producer_admission", return_value=bad):
+                with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_REFERENCE_SOURCE_SECURITY_CONTRACT_NOT_PROVEN"):
+                    seal_candidate(base, candidate)
+
+    def test_source_closure_proof_cannot_be_downgraded(self):
+        with tempfile.TemporaryDirectory() as td:
+            base, candidate = self.make_roots(td)
+            bad = self.admission(); bad["source_bundle_security_contract"] = dict(self.source_bundle_contract())
+            bad["source_bundle_security_contract"]["static_dependency_closure_recomputed"] = False
+            with mock.patch("r7_runtime.r6_producer_seal.verify_producer_admission", return_value=bad):
+                with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_SOURCE_BUNDLE_GUARD_NOT_PROVEN:static_dependency_closure_recomputed"):
+                    seal_candidate(base, candidate)
+
     def test_missing_replay_security_contract_cannot_be_sealed(self):
         with tempfile.TemporaryDirectory() as td:
             base, candidate = self.make_roots(td)
@@ -199,7 +257,7 @@ class ProducerSealTests(unittest.TestCase):
             bad = self.admission(); bad["canonical_reference_replay"] = dict(bad["canonical_reference_replay"])
             bad["canonical_reference_replay"]["reference_generated_by_exact_canonical_source_executor"] = False
             with mock.patch("r7_runtime.r6_producer_seal.verify_producer_admission", return_value=bad):
-                with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_CANONICAL_REFERENCE_EXECUTOR_NOT_PROVEN"):
+                with self.assertRaisesRegex(ProducerSealError, "CANDIDATE_CANONICAL_REFERENCE_SOURCE_GUARD_NOT_PROVEN:reference_generated_by_exact_canonical_source_executor"):
                     seal_candidate(base, candidate)
 
     def test_admission_without_replay_proof_cannot_be_sealed(self):
