@@ -9,6 +9,7 @@ from unittest import mock
 
 from r7_runtime.constants import CANONICAL_R6_ZIP_SHA256
 from r7_runtime.r6_integrity import (
+    OPERATOR_AUTHORITY_CONTRACT_VERSION,
     REQUIRED_R7_OPERATOR_FILES,
     IntegrityError,
     sha256_file,
@@ -132,6 +133,37 @@ class ConfigTests(unittest.TestCase):
 
 
 class PackageIntegrityTests(unittest.TestCase):
+    @staticmethod
+    def seal_wrapper_text() -> str:
+        return "\n".join((
+            "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
+            "R7_R1_R6_PRODUCER_REPLAY_V4",
+            "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
+            "trusted_replay_security_contract_pass",
+            "process_isolation_enforced",
+            "worker_module_sha256",
+            "wall_timeout_seconds",
+        )) + "\n"
+
+    @staticmethod
+    def precheck_wrapper_text() -> str:
+        return "\n".join((
+            "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4",
+            "R7_R1_R6_PRODUCER_REPLAY_V4",
+            "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
+            "trusted_replay_security_contract_pass",
+            "process_isolation_enforced",
+            "worker_module_sha256",
+            "wall_timeout_seconds",
+        )) + "\n"
+
+    def operator_text(self, rel: str) -> str:
+        if rel == "SEAL_R6_PRODUCER_CANDIDATE.ps1":
+            return self.seal_wrapper_text()
+        if rel == "PRECHECK_R6_FUSED_RELEASE.ps1":
+            return self.precheck_wrapper_text()
+        return "R7_OPERATOR:" + rel + "\n"
+
     def build_fake_package(self, root: Path):
         parent_paths = [
             "v16r6/engine.py",
@@ -161,7 +193,7 @@ class PackageIntegrityTests(unittest.TestCase):
         operator_hashes = {}
         for rel in sorted(REQUIRED_R7_OPERATOR_FILES):
             p = root / rel
-            p.write_text("R7_OPERATOR:" + rel, encoding="utf-8")
+            p.write_text(self.operator_text(rel), encoding="utf-8")
             operator_hashes[rel] = sha256_file(p)
         manifest = {
             "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
@@ -179,6 +211,12 @@ class PackageIntegrityTests(unittest.TestCase):
         }
         (root / "R7_R1_PARENT_INTEGRITY.json").write_text(json.dumps(manifest), encoding="utf-8")
 
+    def rehash_operator(self, root: Path, rel: str) -> None:
+        manifest_path = root / "R7_R1_PARENT_INTEGRITY.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["r7_operator_tool_sha256"][rel] = sha256_file(root / rel)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
     def test_full_runtime_package_integrity_passes(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -187,6 +225,54 @@ class PackageIntegrityTests(unittest.TestCase):
             self.assertEqual(result["protected_r6_files"], 5)
             self.assertEqual(result["r7_runtime_code_files"], 2)
             self.assertEqual(result["r7_operator_tool_files"], len(REQUIRED_R7_OPERATOR_FILES))
+            self.assertTrue(result["operator_authority_contract_pass"])
+            self.assertEqual(
+                result["operator_authority_contract"]["operator_authority_contract_version"],
+                OPERATOR_AUTHORITY_CONTRACT_VERSION,
+            )
+            self.assertTrue(result["operator_authority_contract"]["legacy_v3_rejected"])
+
+    def test_hash_consistent_v3_seal_wrapper_is_still_rejected_semantically(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            rel = "SEAL_R6_PRODUCER_CANDIDATE.ps1"
+            (root / rel).write_text(
+                self.seal_wrapper_text().replace(
+                    "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
+                    "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3",
+                ),
+                encoding="utf-8",
+            )
+            self.rehash_operator(root, rel)
+            with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_SEAL_AUTHORITY_TOKEN_MISSING|R7_OPERATOR_LEGACY_AUTHORITY_TOKEN_PRESENT"):
+                verify_runtime_package_integrity(root)
+
+    def test_hash_consistent_v3_precheck_wrapper_is_still_rejected_semantically(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            rel = "PRECHECK_R6_FUSED_RELEASE.ps1"
+            (root / rel).write_text(
+                self.precheck_wrapper_text().replace(
+                    "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4",
+                    "R7_R1_R6_FUSED_RELEASE_PRECHECK_V3",
+                ),
+                encoding="utf-8",
+            )
+            self.rehash_operator(root, rel)
+            with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_PRECHECK_AUTHORITY_TOKEN_MISSING|R7_OPERATOR_LEGACY_AUTHORITY_TOKEN_PRESENT"):
+                verify_runtime_package_integrity(root)
+
+    def test_hash_consistent_process_isolation_removal_is_rejected_semantically(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.build_fake_package(root)
+            rel = "SEAL_R6_PRODUCER_CANDIDATE.ps1"
+            (root / rel).write_text(self.seal_wrapper_text().replace("process_isolation_enforced", "process_isolation_removed"), encoding="utf-8")
+            self.rehash_operator(root, rel)
+            with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_SEAL_AUTHORITY_TOKEN_MISSING:process_isolation_enforced"):
+                verify_runtime_package_integrity(root)
 
     def test_shadow_copy_of_protected_source_does_not_confuse_exact_manifest_paths(self):
         with tempfile.TemporaryDirectory() as td:
