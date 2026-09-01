@@ -4,7 +4,8 @@ Set-StrictMode -Version Latest
 $CanonicalName = 'XAU_BOUNDED_RECOVERY_V16_PROFIT_TRANSFER_R6_RESEARCH_FROZEN.zip'
 $CanonicalSha256 = '8b54c6bc53c38c34b8e88d39893687e8ba75b063897c8b097aaedc68d614fca7'
 $RequiredProbeVersion = 'R7_R1_R6_SOURCE_PROBE_V2'
-$RequiredBundleVersion = 'R7_R1_R6_SOURCE_BUNDLE_V3'
+$RequiredBundleVersion = 'R7_R1_R6_SOURCE_BUNDLE_V4'
+$OwnershipMarkerName = '.R7_R1_SOURCE_BUNDLE_OWNERSHIP.json'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ParentZip = Join-Path $Here $CanonicalName
 $Output = Join-Path $Here 'R7_R1_R6_PRODUCER_SOURCE'
@@ -76,8 +77,10 @@ try {
 
     $ManifestPath = Join-Path $Output 'R7_R1_R6_SOURCE_BUNDLE_MANIFEST.json'
     $ProbePath = Join-Path $Output 'R7_R1_R6_SOURCE_PROBE.json'
+    $OwnershipMarkerPath = Join-Path $Output $OwnershipMarkerName
     if (!(Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { Fail 'bundle manifest missing' }
     if (!(Test-Path -LiteralPath $ProbePath -PathType Leaf)) { Fail 'source probe missing' }
+    if (!(Test-Path -LiteralPath $OwnershipMarkerPath -PathType Leaf)) { Fail 'source-bundle ownership marker missing' }
 
     $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
     $probe = Get-Content -LiteralPath $ProbePath -Raw | ConvertFrom-Json
@@ -88,6 +91,11 @@ try {
     if ($manifest.static_local_python_dependency_closure_extracted -ne $true) { Fail 'local Python dependency closure was not confirmed' }
     if ($manifest.required_local_imports_resolved -ne $true) { Fail 'required local imports were not resolved' }
     if ($manifest.dynamic_imports_allowed -ne $false) { Fail 'dynamic imports may not be admitted' }
+    if ($manifest.prohibited_source_paths_allowed -ne $false) { Fail 'prohibited validation/Holdout source paths may not be admitted' }
+    if ($manifest.owned_output_replacement_only -ne $true) { Fail 'source bundle did not prove owned-output-only replacement' }
+    if ([string]$manifest.ownership_marker_file -ne $OwnershipMarkerName) { Fail 'source-bundle ownership marker name mismatch' }
+    $ownershipHash = (Get-FileHash -LiteralPath $OwnershipMarkerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ([string]$manifest.ownership_marker_sha256 -ne $ownershipHash) { Fail 'source-bundle ownership marker hash mismatch' }
     if ($manifest.strategy_executed -ne $false) { Fail 'bundle claims strategy execution' }
     if ($manifest.strategy_retuned -ne $false) { Fail 'bundle claims strategy retuning' }
     if ($manifest.final_holdout_accessed -ne $false) { Fail 'bundle claims Final Holdout access' }
@@ -104,10 +112,8 @@ try {
         $rel = [string]$relative
         if (-not $rel.EndsWith('.py', [System.StringComparison]::OrdinalIgnoreCase)) { Fail ('non-Python file leaked into source closure: ' + $rel) }
         $normalized = $rel.Replace('\','/').ToLowerInvariant()
-        if ($normalized.StartsWith('research_consumed_validation/') -or
-            $normalized.Contains('/final_holdout') -or
-            $normalized.StartsWith('final_holdout')) {
-            Fail ('prohibited research/Holdout path entered source closure: ' + $rel)
+        foreach ($token in @('research_consumed_validation','final_holdout','protected_validation','retrospective_research','validation_result')) {
+            if ($normalized.Contains($token)) { Fail ('prohibited validation/Holdout path entered source closure: ' + $rel) }
         }
         $sourcePath = Join-Path $Output ($rel.Replace('/','\'))
         if (!(Test-Path -LiteralPath $sourcePath -PathType Leaf)) { Fail ('dependency file missing from extracted source bundle: ' + $rel) }
@@ -131,7 +137,7 @@ try {
     if ([string]$manifest.source_probe_sha256 -ne $probeHash) { Fail 'source probe hash is not bound to bundle manifest' }
 
     Write-Host ''
-    Write-Host '[PASS] Canonical frozen R5/R6 producer source and local Python dependency closure extracted safely.' -ForegroundColor Green
+    Write-Host '[PASS] Canonical frozen R5/R6 Source Bundle V4 extracted with owned-output and prohibited-path protections.' -ForegroundColor Green
     Write-Host ('Source bundle: ' + $Output)
     Write-Host ('Manifest: ' + $ManifestPath)
     Write-Host ('Implementation map: ' + $ProbePath)
