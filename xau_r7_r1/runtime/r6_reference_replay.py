@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from .constants import CANONICAL_R6_ZIP_SHA256
 from .r6_integrity import sha256_file
+from .r6_producer_admission import ProducerAdmissionError, verify_source_bundle
 from .r6_producer_replay import FIXTURE_SCHEMA, load_fixtures
 from .r6_source_bundle import BUNDLE_VERSION
 
@@ -46,6 +47,14 @@ def _canonicalize_stream_bytes(raw: bytes) -> bytes:
 
 
 def _verify_source_bundle_identity(source_root: Path, source_bundle_manifest_path: Path) -> Dict[str, Any]:
+    """Verify exact source identity and recompute closure before execution.
+
+    A reference executor is an authority-bearing strategy execution path. It may
+    not run merely because a candidate-supplied Source Bundle V4 manifest claims
+    its closure is complete. The same lower-level static closure/dynamic-import
+    verifier used by candidate admission is executed first against canonical
+    parent-tree bytes.
+    """
     source_root = Path(source_root).resolve()
     manifest_path = Path(source_bundle_manifest_path).resolve()
     try:
@@ -58,6 +67,31 @@ def _verify_source_bundle_identity(source_root: Path, source_bundle_manifest_pat
         raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_VERSION_MISMATCH")
     if manifest.get("canonical_parent_zip_sha256") != CANONICAL_R6_ZIP_SHA256:
         raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_PARENT_SHA_MISMATCH")
+
+    source_probe_name = manifest.get("source_probe_file")
+    if not isinstance(source_probe_name, str) or not source_probe_name:
+        raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_PROBE_FILENAME_INVALID")
+    source_probe_path = source_root / source_probe_name
+    parent_manifest_path = source_root / "R7_R1_PARENT_INTEGRITY.json"
+    try:
+        source_authority = verify_source_bundle(
+            source_root,
+            parent_manifest_path=parent_manifest_path,
+            source_probe_path=source_probe_path,
+            source_bundle_manifest_path=manifest_path,
+        )
+    except ProducerAdmissionError as exc:
+        raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_AUTHORITY_FAILED:" + str(exc)) from exc
+
+    if source_authority.get("bundle_version") != BUNDLE_VERSION:
+        raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_AUTHORITY_VERSION_MISMATCH")
+    if source_authority.get("static_dependency_closure_recomputed") is not True:
+        raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_STATIC_CLOSURE_NOT_RECOMPUTED")
+    if source_authority.get("dynamic_import_policy_recomputed") is not True:
+        raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_DYNAMIC_IMPORT_POLICY_NOT_RECOMPUTED")
+    if source_authority.get("prohibited_source_paths_blocked") is not True:
+        raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_PROHIBITED_PATH_GUARD_MISSING")
+
     if manifest.get("source_only_bundle") is not True:
         raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_NOT_SOURCE_ONLY")
     if manifest.get("static_local_python_dependency_closure_extracted") is not True:
@@ -66,6 +100,8 @@ def _verify_source_bundle_identity(source_root: Path, source_bundle_manifest_pat
         raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_LOCAL_IMPORTS_UNRESOLVED")
     if manifest.get("dynamic_imports_allowed") is not False:
         raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_DYNAMIC_IMPORTS_ALLOWED")
+    if manifest.get("prohibited_source_paths_allowed") is not False:
+        raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_PROHIBITED_PATHS_ALLOWED")
     if manifest.get("final_holdout_accessed") is not False:
         raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_HOLDOUT_BOUNDARY_BREACH")
     if manifest.get("strategy_retuned") is not False:
@@ -82,20 +118,29 @@ def _verify_source_bundle_identity(source_root: Path, source_bundle_manifest_pat
         if relative.startswith("/") or ".." in Path(relative).parts or not relative.endswith(".py"):
             raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_PATH_INVALID:" + relative)
         lowered = relative.lower()
-        if "final_holdout" in lowered or lowered.startswith("research_consumed_validation/"):
+        if any(token in lowered for token in (
+            "final_holdout",
+            "research_consumed_validation",
+            "protected_validation",
+            "retrospective_research",
+            "validation_result",
+        )):
             raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_PROHIBITED_PATH:" + relative)
         entry = files.get(relative)
         if not isinstance(entry, dict):
             raise ReferenceReplayError("REFERENCE_SOURCE_BUNDLE_FILE_ENTRY_MISSING:" + relative)
         expected = str(entry.get("sha256", "")).lower()
-        actual = (source_root / relative).resolve()
+        raw_path = source_root / relative
+        if raw_path.is_symlink():
+            raise ReferenceReplayError("REFERENCE_SOURCE_FILE_SYMLINK_FORBIDDEN:" + relative)
+        actual = raw_path.resolve()
         try:
             actual.relative_to(source_root)
         except ValueError as exc:
             raise ReferenceReplayError("REFERENCE_SOURCE_PATH_ESCAPE:" + relative) from exc
         if len(expected) != 64 or not actual.is_file() or sha256_file(actual) != expected:
             raise ReferenceReplayError("REFERENCE_SOURCE_FILE_HASH_MISMATCH:" + relative)
-    return manifest
+    return source_authority
 
 
 def execute_canonical_reference(source_root: Path, fixture_path: Path) -> bytes:
@@ -119,7 +164,7 @@ def replay_canonical_reference(
     source_root = Path(source_root).resolve()
     source_bundle_manifest_path = Path(source_bundle_manifest_path).resolve()
     fixture_path = Path(fixture_path).resolve()
-    _verify_source_bundle_identity(source_root, source_bundle_manifest_path)
+    source_authority = _verify_source_bundle_identity(source_root, source_bundle_manifest_path)
     fixtures = load_fixtures(fixture_path)
     executor = _executor or execute_canonical_reference
     try:
@@ -132,7 +177,6 @@ def replay_canonical_reference(
         raise ReferenceReplayError("CANONICAL_REFERENCE_EXECUTOR_OUTPUT_NOT_BYTES")
     stream = _canonicalize_stream_bytes(bytes(raw))
 
-    # Reference output must cover the exact causal fixture IDs and cutoffs.
     expected = {row["fixture_id"]: row["available_through_ms"] for row in fixtures}
     observed: Dict[str, int] = {}
     for line_no, line in enumerate(stream.decode("utf-8").splitlines(), 1):
@@ -153,6 +197,10 @@ def replay_canonical_reference(
         "reference_executor_version": REFERENCE_EXECUTOR_VERSION,
         "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
         "source_bundle_manifest_sha256": sha256_file(source_bundle_manifest_path),
+        "source_bundle_version": source_authority.get("bundle_version"),
+        "source_bundle_static_closure_recomputed": True,
+        "source_bundle_dynamic_import_policy_recomputed": True,
+        "source_bundle_prohibited_paths_blocked": True,
         "fixture_schema": FIXTURE_SCHEMA,
         "fixture_file_sha256": sha256_file(fixture_path),
         "fixture_count": len(fixtures),
