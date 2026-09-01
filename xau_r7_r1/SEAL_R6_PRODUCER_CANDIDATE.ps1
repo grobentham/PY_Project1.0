@@ -14,6 +14,7 @@ Set-StrictMode -Version Latest
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Work = Join-Path ([System.IO.Path]::GetTempPath()) ('XAU_R6_PRODUCER_SEAL_' + [Guid]::NewGuid().ToString('N'))
 $RuntimeStage = Join-Path $Work 'r7_runtime'
+$RequiredSealVersion = 'R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3'
 
 function Fail([string]$Message) { throw ('R6 PRODUCER SEAL BLOCKED: ' + $Message) }
 
@@ -86,11 +87,19 @@ try {
 
     if (!(Test-Path -LiteralPath $Output -PathType Leaf)) { Fail 'candidate seal was not generated' }
     $seal = Get-Content -LiteralPath $Output -Raw | ConvertFrom-Json
-    if ($seal.seal_version -ne 'R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V2') { Fail 'unexpected candidate seal version' }
+    if ($seal.seal_version -ne $RequiredSealVersion) { Fail 'unexpected candidate seal version' }
     if ($seal.admission_ready -ne $true) { Fail 'candidate seal did not prove admission readiness' }
+    if ($seal.canonical_reference_replay_pass -ne $true) { Fail 'candidate seal did not prove canonical-reference replay authority' }
+    if ([string]::IsNullOrWhiteSpace([string]$seal.authority_version)) { Fail 'candidate seal missing authority_version' }
     if ($seal.trusted_producer_replay_pass -ne $true) { Fail 'candidate seal did not prove trusted producer replay' }
     if ($seal.producer_source_policy_pass -ne $true) { Fail 'candidate seal did not prove producer source policy' }
-    foreach ($field in @('fixture_corpus_sha256','producer_replay_attestation_sha256','producer_stream_sha256')) {
+    foreach ($field in @(
+        'fixture_corpus_sha256',
+        'producer_replay_attestation_sha256',
+        'reference_stream_sha256',
+        'reference_replay_attestation_sha256',
+        'producer_stream_sha256'
+    )) {
         $value = [string]$seal.$field
         if ($value.Length -ne 64 -or $value -notmatch '^[0-9a-fA-F]{64}$') { Fail ('candidate seal missing valid ' + $field) }
     }
@@ -100,7 +109,7 @@ try {
     if ($seal.strategy_retuned -ne $false) { Fail 'candidate seal reports strategy retuning' }
 
     Write-Host ''
-    Write-Host '[PASS] R6 causal-producer candidate sealed after trusted replay and parity admission.' -ForegroundColor Green
+    Write-Host '[PASS] R6 causal-producer candidate sealed after canonical-reference authority, trusted replay and parity admission.' -ForegroundColor Green
     Write-Host ('Seal: ' + $Output)
     Write-Host 'The baseline runtime was not modified and execution remains locked.' -ForegroundColor Yellow
 }
