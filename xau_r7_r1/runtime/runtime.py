@@ -77,12 +77,14 @@ def load_config() -> Dict[str, Any]:
 
 
 def producer_execution_admitted() -> bool:
-    """Require V5 canonical-reference authority plus the isolated replay security contract."""
+    """Require all current V5 source/reference/replay authority contracts."""
     if not CAUSAL_R6_PRODUCER_READY:
         return False
     status = producer_admission_status(ROOT)
     return bool(
         status.get("ready", False)
+        and status.get("reference_source_security_contract_pass", False)
+        and status.get("source_bundle_security_contract_pass", False)
         and status.get("canonical_reference_replay_pass", False)
         and status.get("trusted_replay_security_contract_pass", False)
         and status.get("authority_version") == "R7_R1_R6_PRODUCER_ADMISSION_AUTHORITY_V5"
@@ -148,6 +150,8 @@ def offline_status(store: AuditStore, package_integrity: Dict[str, Any], store_i
         "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY),
         "producer_admission_ready": bool(admission.get("ready", False)),
         "producer_admission_authority_version": admission.get("authority_version"),
+        "reference_source_security_contract_pass": bool(admission.get("reference_source_security_contract_pass", False)),
+        "source_bundle_security_contract_pass": bool(admission.get("source_bundle_security_contract_pass", False)),
         "trusted_replay_security_contract_pass": bool(admission.get("trusted_replay_security_contract_pass", False)),
         "canonical_reference_replay_pass": bool(admission.get("canonical_reference_replay_pass", False)),
         "execution_unlocked": demo_execution_enabled(cfg),
@@ -170,6 +174,8 @@ def connected_status(store: AuditStore, gateway: MT5Gateway, cfg: Dict[str, Any]
         "causal_r6_producer_ready": bool(CAUSAL_R6_PRODUCER_READY),
         "producer_admission_ready": bool(admission.get("ready", False)),
         "producer_admission_authority_version": admission.get("authority_version"),
+        "reference_source_security_contract_pass": bool(admission.get("reference_source_security_contract_pass", False)),
+        "source_bundle_security_contract_pass": bool(admission.get("source_bundle_security_contract_pass", False)),
         "trusted_replay_security_contract_pass": bool(admission.get("trusted_replay_security_contract_pass", False)),
         "canonical_reference_replay_pass": bool(admission.get("canonical_reference_replay_pass", False)),
         "execution_unlocked": demo_execution_enabled(cfg),
@@ -232,7 +238,7 @@ def main() -> None:
                 if not CAUSAL_R6_PRODUCER_READY:
                     raise RuntimeError("CAUSAL_R6_PRODUCER_NOT_ADMITTED: automatic decision execution remains hard-locked")
                 if not producer_execution_admitted():
-                    raise RuntimeError("CAUSAL_R6_PRODUCER_V5_AUTHORITY_NOT_ADMITTED: canonical-reference and isolated-replay authority are required")
+                    raise RuntimeError("CAUSAL_R6_PRODUCER_V5_AUTHORITY_NOT_ADMITTED: source, canonical-reference and isolated-replay authority are required")
                 if not execution_enabled:
                     raise RuntimeError("R6_INBOX_DEMO_EXECUTION_LOCKED: automatic decision consumption is disabled until all producer and demo unlock gates pass")
             if args.process_r6_decision:
