@@ -76,6 +76,38 @@ jobs:
           if (-not (Test-Path 'xau_r7_r1/START_XAU_R7_R1.bat.template' -PathType Leaf)) {
             throw 'START_XAU_R7_R1.bat.template missing'
           }
+      - name: Validate wrapper certification authority contracts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $seal = Get-Content 'xau_r7_r1/SEAL_R6_PRODUCER_CANDIDATE.ps1' -Raw
+          $precheck = Get-Content 'xau_r7_r1/PRECHECK_R6_FUSED_RELEASE.ps1' -Raw
+          $requiredSealTokens = @(
+            "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
+            "R7_R1_R6_PRODUCER_REPLAY_V4",
+            "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
+            "trusted_replay_security_contract_pass",
+            "process_isolation_enforced",
+            "worker_module_sha256",
+            "wall_timeout_seconds"
+          )
+          foreach ($token in $requiredSealTokens) {
+            if (-not $seal.Contains($token)) { throw ('seal wrapper missing authority token: ' + $token) }
+          }
+          $requiredPrecheckTokens = @(
+            "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4",
+            "R7_R1_R6_PRODUCER_REPLAY_V4",
+            "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
+            "trusted_replay_security_contract_pass",
+            "process_isolation_enforced",
+            "worker_module_sha256",
+            "wall_timeout_seconds"
+          )
+          foreach ($token in $requiredPrecheckTokens) {
+            if (-not $precheck.Contains($token)) { throw ('precheck wrapper missing authority token: ' + $token) }
+          }
+          if ($seal.Contains('R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3')) { throw 'seal wrapper still references V3 authority' }
+          if ($precheck.Contains('R7_R1_R6_FUSED_RELEASE_PRECHECK_V3')) { throw 'precheck wrapper still references V3 authority' }
       - name: Assemble builder-equivalent runtime tree
         shell: powershell
         run: |
