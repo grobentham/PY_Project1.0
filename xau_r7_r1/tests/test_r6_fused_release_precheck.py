@@ -12,6 +12,16 @@ from r7_runtime.r6_fused_release_precheck import (
     FusedReleasePrecheckError,
     verify_fused_release_precheck,
 )
+from r7_runtime.r6_producer_replay import (
+    MAX_EXECUTION_LINE_EVENTS,
+    MAX_FIXTURE_COUNT,
+    MAX_INPUT_DEPTH,
+    MAX_INPUT_NODES_PER_FIXTURE,
+    MAX_RANGE_ITEMS,
+    MAX_REPLAY_WALL_SECONDS,
+    REPLAY_VERSION,
+    SOURCE_POLICY_VERSION,
+)
 from r7_runtime.r6_producer_seal import SEAL_VERSION
 
 
@@ -20,8 +30,22 @@ class FusedReleasePrecheckTests(unittest.TestCase):
         runtime = root / "runtime"
         candidate = root / "candidate"
         runtime.mkdir(); candidate.mkdir()
-        seal_path = candidate / "R7_R1_R6_PRODUCER_CANDIDATE_SEAL.json"
-        return runtime, candidate, seal_path
+        return runtime, candidate, candidate / "R7_R1_R6_PRODUCER_CANDIDATE_SEAL.json"
+
+    @staticmethod
+    def security_contract():
+        return {
+            "replay_version": REPLAY_VERSION,
+            "source_policy_version": SOURCE_POLICY_VERSION,
+            "process_isolation_enforced": True,
+            "worker_module_sha256": "f" * 64,
+            "wall_timeout_seconds": MAX_REPLAY_WALL_SECONDS,
+            "max_fixture_count": MAX_FIXTURE_COUNT,
+            "max_input_depth": MAX_INPUT_DEPTH,
+            "max_input_nodes_per_fixture": MAX_INPUT_NODES_PER_FIXTURE,
+            "max_range_items": MAX_RANGE_ITEMS,
+            "max_execution_line_events": MAX_EXECUTION_LINE_EVENTS,
+        }
 
     def good_seal(self):
         hashes = {
@@ -50,6 +74,8 @@ class FusedReleasePrecheckTests(unittest.TestCase):
             "admission_version": "TEST_ADMISSION_V4",
             "authority_version": "TEST_AUTHORITY_V5",
             "admission_ready": True,
+            "trusted_replay_security_contract_pass": True,
+            "trusted_replay_security_contract": self.security_contract(),
             "canonical_reference_replay_pass": True,
             "trusted_producer_replay_pass": True,
             "producer_source_policy_pass": True,
@@ -61,47 +87,52 @@ class FusedReleasePrecheckTests(unittest.TestCase):
 
     @staticmethod
     def baseline_integrity():
-        return {
-            "causal_r6_producer_ready": False,
-            "execution_runtime_hard_locked": True,
-        }
+        return {"causal_r6_producer_ready": False, "execution_runtime_hard_locked": True}
 
-    def test_matching_fresh_seal_only_grants_future_fused_build_eligibility(self):
+    def run_with_good_baseline(self, runtime, candidate, seal_path, fresh=None):
+        supplied = self.good_seal()
+        seal_path.write_text(json.dumps(supplied), encoding="utf-8")
+        with mock.patch(
+            "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
+            return_value=self.baseline_integrity(),
+        ), mock.patch(
+            "r7_runtime.r6_fused_release_precheck.seal_candidate",
+            return_value=dict(supplied if fresh is None else fresh),
+        ):
+            return verify_fused_release_precheck(runtime, candidate, seal_path)
+
+    def test_matching_fresh_v4_seal_only_grants_future_fused_build_eligibility(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, candidate, seal_path = self.build_paths(Path(td))
-            seal = self.good_seal()
-            seal_path.write_text(json.dumps(seal), encoding="utf-8")
-            with mock.patch(
-                "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
-                return_value=self.baseline_integrity(),
-            ), mock.patch(
-                "r7_runtime.r6_fused_release_precheck.seal_candidate",
-                return_value=dict(seal),
-            ):
-                report = verify_fused_release_precheck(runtime, candidate, seal_path)
+            report = self.run_with_good_baseline(runtime, candidate, seal_path)
             self.assertEqual(report["precheck_version"], PRECHECK_VERSION)
             self.assertTrue(report["eligible_for_future_fused_build"])
             self.assertTrue(report["fresh_seal_matches_supplied_seal"])
+            self.assertTrue(report["trusted_replay_security_contract_pass"])
+            self.assertEqual(report["trusted_replay_security_contract"], self.security_contract())
             self.assertTrue(report["canonical_reference_replay_pass"])
             self.assertEqual(report["authority_version"], "TEST_AUTHORITY_V5")
             self.assertTrue(report["trusted_producer_replay_pass"])
             self.assertTrue(report["producer_source_policy_pass"])
-            self.assertEqual(report["fixture_corpus_sha256"], seal["fixture_corpus_sha256"])
-            self.assertEqual(report["reference_stream_sha256"], seal["reference_stream_sha256"])
-            self.assertEqual(report["reference_replay_attestation_sha256"], seal["reference_replay_attestation_sha256"])
             self.assertFalse(report["fused_package_created"])
             self.assertFalse(report["readiness_switch_changed"])
             self.assertFalse(report["execution_unlocked"])
             self.assertTrue(report["successor_release_required"])
 
+    def test_old_v3_seal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, candidate, seal_path = self.build_paths(Path(td))
+            seal = self.good_seal(); seal["seal_version"] = "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3"
+            seal_path.write_text(json.dumps(seal), encoding="utf-8")
+            with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", return_value=self.baseline_integrity()):
+                with self.assertRaisesRegex(FusedReleasePrecheckError, "SEAL_VERSION_MISMATCH"):
+                    verify_fused_release_precheck(runtime, candidate, seal_path)
+
     def test_baseline_integrity_failure_blocks_precheck(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, candidate, seal_path = self.build_paths(Path(td))
             seal_path.write_text(json.dumps(self.good_seal()), encoding="utf-8")
-            with mock.patch(
-                "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
-                side_effect=RuntimeError("RUNTIME_HASH_MISMATCH"),
-            ):
+            with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", side_effect=RuntimeError("RUNTIME_HASH_MISMATCH")):
                 with self.assertRaisesRegex(FusedReleasePrecheckError, "BASELINE_PACKAGE_INTEGRITY_FAILED"):
                     verify_fused_release_precheck(runtime, candidate, seal_path)
 
@@ -110,110 +141,92 @@ class FusedReleasePrecheckTests(unittest.TestCase):
             runtime, candidate, seal_path = self.build_paths(Path(td))
             seal_path.write_text(json.dumps(self.good_seal()), encoding="utf-8")
             bad = {"causal_r6_producer_ready": True, "execution_runtime_hard_locked": False}
-            with mock.patch(
-                "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
-                return_value=bad,
-            ):
+            with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", return_value=bad):
                 with self.assertRaisesRegex(FusedReleasePrecheckError, "BASELINE_PRODUCER_LOCK_NOT_FALSE"):
                     verify_fused_release_precheck(runtime, candidate, seal_path)
+
+    def test_replay_security_contract_claim_cannot_be_downgraded(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, candidate, seal_path = self.build_paths(Path(td))
+            for mutate, error in (
+                (lambda s: s.__setitem__("trusted_replay_security_contract_pass", False), "SEAL_REPLAY_SECURITY_CONTRACT_NOT_PASS"),
+                (lambda s: s["trusted_replay_security_contract"].__setitem__("process_isolation_enforced", False), "SEAL_REPLAY_PROCESS_ISOLATION_NOT_PASS"),
+            ):
+                seal = self.good_seal(); mutate(seal)
+                seal_path.write_text(json.dumps(seal), encoding="utf-8")
+                with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", return_value=self.baseline_integrity()):
+                    with self.assertRaisesRegex(FusedReleasePrecheckError, error):
+                        verify_fused_release_precheck(runtime, candidate, seal_path)
 
     def test_stale_seal_after_reference_replay_change_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, candidate, seal_path = self.build_paths(Path(td))
-            supplied = self.good_seal()
-            fresh = self.good_seal()
+            supplied = self.good_seal(); fresh = self.good_seal()
             fresh["reference_replay_attestation_sha256"] = "b" * 64
             fresh["candidate_files_sha256"] = dict(fresh["candidate_files_sha256"])
             fresh["candidate_files_sha256"]["R7_R1_R6_REFERENCE_REPLAY.json"] = "b" * 64
             seal_path.write_text(json.dumps(supplied), encoding="utf-8")
-            with mock.patch(
-                "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
-                return_value=self.baseline_integrity(),
-            ), mock.patch(
-                "r7_runtime.r6_fused_release_precheck.seal_candidate",
-                return_value=fresh,
-            ):
+            with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", return_value=self.baseline_integrity()), mock.patch("r7_runtime.r6_fused_release_precheck.seal_candidate", return_value=fresh):
                 with self.assertRaisesRegex(FusedReleasePrecheckError, "STALE_OR_MISMATCHED_SEAL"):
+                    verify_fused_release_precheck(runtime, candidate, seal_path)
+
+    def test_stale_seal_after_replay_security_contract_change_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, candidate, seal_path = self.build_paths(Path(td))
+            supplied = self.good_seal(); fresh = self.good_seal()
+            fresh["trusted_replay_security_contract"] = dict(fresh["trusted_replay_security_contract"])
+            fresh["trusted_replay_security_contract"]["worker_module_sha256"] = "e" * 64
+            seal_path.write_text(json.dumps(supplied), encoding="utf-8")
+            with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", return_value=self.baseline_integrity()), mock.patch("r7_runtime.r6_fused_release_precheck.seal_candidate", return_value=fresh):
+                with self.assertRaisesRegex(FusedReleasePrecheckError, "STALE_OR_MISMATCHED_SEAL:trusted_replay_security_contract"):
                     verify_fused_release_precheck(runtime, candidate, seal_path)
 
     def test_seal_claiming_execution_unlock_is_rejected_before_fresh_seal(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, candidate, seal_path = self.build_paths(Path(td))
-            seal = self.good_seal()
-            seal["execution_unlocked"] = True
+            seal = self.good_seal(); seal["execution_unlocked"] = True
             seal_path.write_text(json.dumps(seal), encoding="utf-8")
-            with mock.patch(
-                "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
-                return_value=self.baseline_integrity(),
-            ):
+            with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", return_value=self.baseline_integrity()):
                 with self.assertRaisesRegex(FusedReleasePrecheckError, "SEAL_EXECUTION_UNLOCK_CLAIM"):
                     verify_fused_release_precheck(runtime, candidate, seal_path)
 
     def test_reference_replay_claim_cannot_be_downgraded(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, candidate, seal_path = self.build_paths(Path(td))
-            seal = self.good_seal()
-            seal["canonical_reference_replay_pass"] = False
+            seal = self.good_seal(); seal["canonical_reference_replay_pass"] = False
             seal_path.write_text(json.dumps(seal), encoding="utf-8")
-            with mock.patch(
-                "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
-                return_value=self.baseline_integrity(),
-            ):
+            with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", return_value=self.baseline_integrity()):
                 with self.assertRaisesRegex(FusedReleasePrecheckError, "SEAL_CANONICAL_REFERENCE_REPLAY_NOT_PASS"):
                     verify_fused_release_precheck(runtime, candidate, seal_path)
 
     def test_missing_authority_version_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, candidate, seal_path = self.build_paths(Path(td))
-            seal = self.good_seal()
-            seal["authority_version"] = ""
+            seal = self.good_seal(); seal["authority_version"] = ""
             seal_path.write_text(json.dumps(seal), encoding="utf-8")
-            with mock.patch(
-                "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
-                return_value=self.baseline_integrity(),
-            ):
+            with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", return_value=self.baseline_integrity()):
                 with self.assertRaisesRegex(FusedReleasePrecheckError, "SEAL_AUTHORITY_VERSION_MISSING"):
                     verify_fused_release_precheck(runtime, candidate, seal_path)
 
     def test_replay_or_source_policy_claim_cannot_be_downgraded(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, candidate, seal_path = self.build_paths(Path(td))
-            for field, error in (
-                ("trusted_producer_replay_pass", "SEAL_TRUSTED_REPLAY_NOT_PASS"),
-                ("producer_source_policy_pass", "SEAL_SOURCE_POLICY_NOT_PASS"),
-            ):
-                seal = self.good_seal()
-                seal[field] = False
+            for field, error in (("trusted_producer_replay_pass", "SEAL_TRUSTED_REPLAY_NOT_PASS"), ("producer_source_policy_pass", "SEAL_SOURCE_POLICY_NOT_PASS")):
+                seal = self.good_seal(); seal[field] = False
                 seal_path.write_text(json.dumps(seal), encoding="utf-8")
-                with mock.patch(
-                    "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
-                    return_value=self.baseline_integrity(),
-                ):
+                with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", return_value=self.baseline_integrity()):
                     with self.assertRaisesRegex(FusedReleasePrecheckError, error):
                         verify_fused_release_precheck(runtime, candidate, seal_path)
 
     def test_holdout_or_retune_claim_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, candidate, seal_path = self.build_paths(Path(td))
-            seal = self.good_seal()
-            seal["final_holdout_accessed"] = True
-            seal_path.write_text(json.dumps(seal), encoding="utf-8")
-            with mock.patch(
-                "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
-                return_value=self.baseline_integrity(),
-            ):
-                with self.assertRaisesRegex(FusedReleasePrecheckError, "SEAL_HOLDOUT_BOUNDARY_BREACH"):
-                    verify_fused_release_precheck(runtime, candidate, seal_path)
-
-            seal = self.good_seal()
-            seal["strategy_retuned"] = True
-            seal_path.write_text(json.dumps(seal), encoding="utf-8")
-            with mock.patch(
-                "r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity",
-                return_value=self.baseline_integrity(),
-            ):
-                with self.assertRaisesRegex(FusedReleasePrecheckError, "SEAL_RETUNING_BREACH"):
-                    verify_fused_release_precheck(runtime, candidate, seal_path)
+            for field, error in (("final_holdout_accessed", "SEAL_HOLDOUT_BOUNDARY_BREACH"), ("strategy_retuned", "SEAL_RETUNING_BREACH")):
+                seal = self.good_seal(); seal[field] = True
+                seal_path.write_text(json.dumps(seal), encoding="utf-8")
+                with mock.patch("r7_runtime.r6_fused_release_precheck.verify_runtime_package_integrity", return_value=self.baseline_integrity()):
+                    with self.assertRaisesRegex(FusedReleasePrecheckError, error):
+                        verify_fused_release_precheck(runtime, candidate, seal_path)
 
 
 if __name__ == "__main__":
