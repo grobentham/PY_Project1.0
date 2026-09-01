@@ -6,7 +6,7 @@
 
 The repaired runtime has no known open Critical/High/Medium defect from the adversarial runtime audit. The verified CI matrix covers Linux/Python 3.9, 3.11 and 3.13 plus Windows/Python 3.11. Windows also parses the release/source/producer PowerShell tools and exercises the `msvcrt` single-instance-lock path.
 
-The producer-verification authority is now **V5**. It combines canonical source-bundle/probe provenance, isolated/resource-bounded trusted candidate replay V4, parity evidence and independent canonical-reference replay. Candidate Seal V3 and Fused-release Precheck V3 both require that V5 authority.
+The producer-verification authority is now **V5**. It combines canonical source-bundle/probe provenance, isolated/resource-bounded trusted candidate replay V4, parity evidence and independent canonical-reference replay. Candidate Seal V4 and Fused-release Precheck V4 both require that V5 authority.
 
 This closure does **not** claim autonomous R6 trading is implemented. `CAUSAL_R6_PRODUCER_READY` remains hard-frozen to `False`. The actual source-derived causal producer and canonical reference executor are not implemented/admitted, R6 is not retuned, and Final Holdout remains untouched.
 
@@ -44,6 +44,7 @@ This closure does **not** claim autonomous R6 trading is implemented. `CAUSAL_R6
 | Producer certification runaway | Trusted replay V4 executes the candidate in a separate hash-covered worker process with a 60-second wall timeout, 1,000,000 Python call/line-event budget, bounded source/fixture/input/range/output sizes, and rejects `while` loops. |
 | Replay budget interception | Candidate `try/except`/`try*`, executable decorators/annotations, mutable top-level state and mutable/executable defaults are rejected, preventing candidate code from swallowing verifier budget exceptions or executing hidden module-definition state. |
 | Replay downgrade | V5 authority and runtime independently require the current V4 replay/source-policy contract, process isolation, worker hash and exact resource limits; downgraded V3/V4-generic evidence cannot unlock execution. |
+| Seal/precheck downgrade | Candidate Seal V4 explicitly carries the replay-security contract; Fused-release Precheck V4 rejects legacy V3 seals and requires the supplied/fresh worker-security contracts to match exactly. |
 | Persistent state | SQLite WAL + `synchronous=FULL`, transactional state/audit writes and semantic ledger replay. |
 | State tampering | Deleted/injected intents/state/tickets, payload mutation and audit discontinuity fail closed. |
 | Idempotency | Transactional local payload identity plus broker magic/comment duplicate reconciliation. |
@@ -163,9 +164,9 @@ This was repaired. The actual runtime unlock now requires:
 
 Regression tests prove that legacy candidate-admission `ready=true`, downgraded replay version and disabled process-isolation evidence cannot unlock demo execution.
 
-## Candidate Seal V3
+## Candidate Seal V4
 
-`R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3` is generated only after V5 admission passes in an isolated copy. Candidate evidence includes and hash-binds:
+`R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4` is generated only after V5 admission passes in an isolated copy. Candidate evidence includes and hash-binds:
 
 - producer module;
 - source probe;
@@ -176,21 +177,26 @@ Regression tests prove that legacy candidate-admission `ready=true`, downgraded 
 - canonical reference replay attestation;
 - producer stream;
 - isolation manifest;
-- parity report.
+- parity report;
+- `trusted_replay_security_contract_pass=true`;
+- the exact replay/source-policy versions, process-isolation claim, worker SHA-256, wall timeout and replay resource limits.
 
-Because the replay attestation is hash-bound and V5 freshly validates its V4 security contract, a stale weaker replay cannot be promoted by resealing.
+Seal V4 fails closed if replay-security authority is missing, if process isolation is false, if the worker hash is invalid, or if the wall timeout is invalid. This makes replay authority first-class seal evidence instead of leaving it implicit behind the replay-attestation hash.
 
 The seal cannot mutate the locked baseline or unlock execution.
 
-## Fused-release Precheck V3
+## Fused-release Precheck V4
 
-`R7_R1_R6_FUSED_RELEASE_PRECHECK_V3`:
+`R7_R1_R6_FUSED_RELEASE_PRECHECK_V4`:
 
 - verifies locked baseline package integrity;
-- validates supplied V3 seal;
-- freshly reseals the candidate;
-- requires all authority-bearing fields and hashes, including canonical-reference and replay-attestation evidence, to match;
+- rejects legacy V3 seals automatically;
+- validates the supplied V4 replay-security contract;
+- freshly reseals the candidate under current V5 authority;
+- requires all authority-bearing fields and hashes, including the full replay worker/security contract, canonical-reference evidence and replay-attestation evidence, to match;
 - reports future fused-build eligibility only.
+
+Regression coverage proves that an old V3 seal, a disabled replay-security PASS claim, disabled process isolation, or a stale worker/security-contract hash cannot pass V4 precheck.
 
 It does not integrate code, change `CAUSAL_R6_PRODUCER_READY`, create an execution-enabled package or authorize trading.
 
@@ -198,7 +204,7 @@ It does not integrate code, change `CAUSAL_R6_PRODUCER_READY`, create an executi
 
 V5 testing exposed an OS-specific JSONL hash issue: Windows `write_text()` newline translation produced CRLF bytes while canonical replay produced LF bytes. Hash-bound canonical reference fixtures now use explicit UTF-8 `write_bytes()` with canonical compact JSONL, making provenance bytes identical across Windows/Linux.
 
-The isolated replay V4 path is also exercised on all supported CI lanes, including Windows subprocess/module execution.
+The isolated replay V4 and Seal/Precheck V4 paths are exercised on all supported CI lanes, including Windows subprocess/module execution.
 
 ## Execution lock
 
@@ -217,7 +223,7 @@ The remaining autonomous-system work is **not another broker-runtime repair**. I
 3. implement the causal `r6_causal_producer.py` from that same frozen source;
 4. generate causal fixtures/reference/producer streams;
 5. require zero parity mismatch and V5 admission;
-6. produce V3 seal + V3 precheck;
+6. produce V4 seal + V4 precheck;
 7. only then create a separately audited fused successor release.
 
 The canonical R6 ZIP is available in the project Library, but the current ChatGPT local command/Python backend fails before process start and the file service does not expose ZIP member source. The GitHub connector can download workflow artifacts but cannot upload the materialized private archive into Actions. This tooling limitation is not permission to approximate the strategy or publish canonical strategy IP to the public repository.
@@ -234,4 +240,4 @@ No legitimate producer-enabled fused ZIP has been created yet.
 
 The R7-R1 broker/risk/state/containment repair and V5 producer-verification authority are implemented and fail closed.
 
-Do not call the autonomous trading system `SEALED`, `FINAL`, production-ready or live-ready. Do not enable automatic execution until the exact canonical source executor and causal producer are implemented, V5-admitted, V3-sealed, V3-prechecked and incorporated through a separately audited successor build. Real/live-account execution remains prohibited.
+Do not call the autonomous trading system `SEALED`, `FINAL`, production-ready or live-ready. Do not enable automatic execution until the exact canonical source executor and causal producer are implemented, V5-admitted, V4-sealed, V4-prechecked and incorporated through a separately audited successor build. Real/live-account execution remains prohibited.
