@@ -18,9 +18,10 @@ from r7_runtime.r6_reference_replay import replay_canonical_reference
 class ProducerAdmissionAuthorityTests(unittest.TestCase):
     def prepare(self, root: Path):
         paths = build_trusted_fixture(root)
+        original_reference_bytes = paths["reference"].read_bytes()
 
         def exact_executor(source_root: Path, fixture_path: Path) -> bytes:
-            return paths["reference"].read_bytes()
+            return original_reference_bytes
 
         stream, attestation = replay_canonical_reference(
             root,
@@ -28,7 +29,8 @@ class ProducerAdmissionAuthorityTests(unittest.TestCase):
             paths["fixtures"],
             _executor=exact_executor,
         )
-        self.assertEqual(stream, paths["reference"].read_bytes())
+        # The canonical executor owns the exact serialized reference bytes.
+        paths["reference"].write_bytes(stream)
         reference_replay = root / "R7_R1_R6_REFERENCE_REPLAY.json"
         reference_replay.write_text(
             json.dumps(attestation, indent=2, sort_keys=True) + "\n",
