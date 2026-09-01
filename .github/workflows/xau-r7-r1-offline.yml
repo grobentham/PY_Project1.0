@@ -76,12 +76,45 @@ jobs:
           if (-not (Test-Path 'xau_r7_r1/START_XAU_R7_R1.bat.template' -PathType Leaf)) {
             throw 'START_XAU_R7_R1.bat.template missing'
           }
+      - name: Validate builder source authority contract
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $builder = Get-Content 'xau_r7_r1/BUILD_R7_R1.ps1' -Raw
+          $requiredBuilderTokens = @(
+            "R7_R1_CANONICAL_SOURCE_BUILD_PREFLIGHT_V2",
+            "R7_R1_R6_SOURCE_BUNDLE_V4",
+            "R7_R1_R6_SOURCE_PROBE_V2",
+            "canonical_source_preflight_version",
+            "canonical_source_bundle_version",
+            "canonical_source_probe_version",
+            "prohibited_source_paths_blocked",
+            "owned_output_replacement_verified",
+            "ownership_marker_sha256"
+          )
+          foreach ($token in $requiredBuilderTokens) {
+            if (-not $builder.Contains($token)) { throw ('builder missing source authority token: ' + $token) }
+          }
+          if ($builder.Contains('R7_R1_CANONICAL_SOURCE_BUILD_PREFLIGHT_V1')) { throw 'builder still references source preflight V1' }
+          if ($builder.Contains('R7_R1_R6_SOURCE_BUNDLE_V3')) { throw 'builder still references source bundle V3' }
       - name: Validate wrapper certification authority contracts
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          $extract = Get-Content 'xau_r7_r1/EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1' -Raw
           $seal = Get-Content 'xau_r7_r1/SEAL_R6_PRODUCER_CANDIDATE.ps1' -Raw
           $precheck = Get-Content 'xau_r7_r1/PRECHECK_R6_FUSED_RELEASE.ps1' -Raw
+          $requiredExtractTokens = @(
+            "R7_R1_R6_SOURCE_BUNDLE_V4",
+            "R7_R1_R6_SOURCE_PROBE_V2",
+            "prohibited_source_paths_allowed",
+            "owned_output_replacement_only",
+            "ownership_marker_sha256",
+            ".R7_R1_SOURCE_BUNDLE_OWNERSHIP.json"
+          )
+          foreach ($token in $requiredExtractTokens) {
+            if (-not $extract.Contains($token)) { throw ('extract wrapper missing authority token: ' + $token) }
+          }
           $requiredSealTokens = @(
             "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
             "R7_R1_R6_PRODUCER_REPLAY_V4",
@@ -106,6 +139,7 @@ jobs:
           foreach ($token in $requiredPrecheckTokens) {
             if (-not $precheck.Contains($token)) { throw ('precheck wrapper missing authority token: ' + $token) }
           }
+          if ($extract.Contains('R7_R1_R6_SOURCE_BUNDLE_V3')) { throw 'extract wrapper still references V3 source bundle authority' }
           if ($seal.Contains('R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3')) { throw 'seal wrapper still references V3 authority' }
           if ($precheck.Contains('R7_R1_R6_FUSED_RELEASE_PRECHECK_V3')) { throw 'precheck wrapper still references V3 authority' }
       - name: Assemble builder-equivalent runtime tree
