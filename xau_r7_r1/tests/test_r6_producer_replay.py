@@ -33,7 +33,7 @@ class ProducerReplayTests(unittest.TestCase):
         }, sort_keys=True) + "\n", encoding="utf-8")
         return path
 
-    def test_pure_deterministic_producer_replays(self):
+    def test_pure_deterministic_producer_replays_in_isolated_worker(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             module = self.write_module(root, 'def produce(prefix):\n    return prefix["decision"]\n')
@@ -42,9 +42,14 @@ class ProducerReplayTests(unittest.TestCase):
             self.assertTrue(stream.endswith(b"\n"))
             self.assertTrue(report["deterministic_double_run"])
             self.assertTrue(report["source_policy_pass"])
+            self.assertTrue(report["process_isolation_enforced"])
+            self.assertGreater(report["wall_timeout_seconds"], 0)
+            self.assertEqual(len(report["worker_module_sha256"]), 64)
             self.assertFalse(report["imports_allowed"])
             self.assertFalse(report["dunder_access_allowed"])
             self.assertFalse(report["while_loops_allowed"])
+            self.assertFalse(report["mutable_top_level_state_allowed"])
+            self.assertFalse(report["mutable_or_executable_defaults_allowed"])
             self.assertTrue(report["range_is_bounded"])
             self.assertTrue(report["execution_line_budget_enforced"])
             self.assertEqual(report["producer_input_mutation_count"], 0)
@@ -78,6 +83,45 @@ class ProducerReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_STATEFUL_CONSTRUCT_FORBIDDEN"):
                 verify_producer_source_policy(module)
 
+    def test_mutable_top_level_state_is_forbidden(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            module = self.write_module(root, 'STATE = []\ndef produce(prefix):\n    return None\n')
+            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_TOP_LEVEL_MUTABLE_OR_NONLITERAL_ASSIGNMENT"):
+                verify_producer_source_policy(module)
+
+    def test_mutable_or_executable_function_defaults_are_forbidden(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            module = self.write_module(
+                root,
+                'def helper(state=[0]):\n'
+                '    return state[0]\n'
+                'def produce(prefix):\n'
+                '    return {"n": helper()}\n',
+            )
+            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_FUNCTION_DEFAULT_NOT_IMMUTABLE_LITERAL"):
+                verify_producer_source_policy(module)
+            module = self.write_module(
+                root,
+                'def helper(state=sum(range(10))):\n'
+                '    return state\n'
+                'def produce(prefix):\n'
+                '    return {"n": helper()}\n',
+            )
+            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_FUNCTION_DEFAULT_NOT_IMMUTABLE_LITERAL"):
+                verify_producer_source_policy(module)
+
+    def test_function_decorators_and_annotations_are_forbidden(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            module = self.write_module(root, '@staticmethod\ndef produce(prefix):\n    return None\n')
+            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_FUNCTION_DECORATOR_FORBIDDEN"):
+                verify_producer_source_policy(module)
+            module = self.write_module(root, 'def produce(prefix: int):\n    return None\n')
+            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_FUNCTION_ANNOTATION_FORBIDDEN"):
+                verify_producer_source_policy(module)
+
     def test_unbounded_while_loop_is_forbidden_before_execution(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -90,7 +134,7 @@ class ProducerReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_UNBOUNDED_WHILE_FORBIDDEN"):
                 verify_producer_source_policy(module)
 
-    def test_execution_line_budget_stops_large_python_loop(self):
+    def test_execution_line_budget_stops_large_python_loop_inside_worker_logic(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             module = self.write_module(
@@ -104,9 +148,9 @@ class ProducerReplayTests(unittest.TestCase):
             fixtures = self.write_fixture(root)
             with mock.patch.object(replay_mod, "MAX_EXECUTION_LINE_EVENTS", 25):
                 with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_EXECUTION_BUDGET_EXCEEDED:fx"):
-                    replay_producer(fixtures, module)
+                    replay_mod._replay_producer_inprocess(fixtures, module)
 
-    def test_range_builtin_is_bounded(self):
+    def test_range_builtin_is_bounded_inside_worker_logic(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             module = self.write_module(
@@ -117,6 +161,15 @@ class ProducerReplayTests(unittest.TestCase):
             fixtures = self.write_fixture(root)
             with mock.patch.object(replay_mod, "MAX_RANGE_ITEMS", 10):
                 with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_RANGE_LIMIT_EXCEEDED"):
+                    replay_mod._replay_producer_inprocess(fixtures, module)
+
+    def test_worker_wall_timeout_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            module = self.write_module(root, 'def produce(prefix):\n    return prefix["decision"]\n')
+            fixtures = self.write_fixture(root)
+            with mock.patch.object(replay_mod, "MAX_REPLAY_WALL_SECONDS", 0.000001):
+                with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_REPLAY_WALL_TIMEOUT"):
                     replay_producer(fixtures, module)
 
     def test_fixture_input_depth_is_bounded(self):
@@ -175,21 +228,6 @@ class ProducerReplayTests(unittest.TestCase):
             cutoff = 1_700_000_000_000
             fixtures = self.write_fixture(root, {"signal_bar_ms": cutoff + 1}, cutoff=cutoff)
             with self.assertRaisesRegex(ProducerReplayError, "FIXTURE_TIMESTAMP_AFTER_PREFIX"):
-                replay_producer(fixtures, module)
-
-    def test_nondeterministic_mutable_default_state_is_rejected(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            module = self.write_module(
-                root,
-                'def helper(state=[0]):\n'
-                '    state[0] += 1\n'
-                '    return state[0]\n'
-                'def produce(prefix):\n'
-                '    return {"n": helper()}\n',
-            )
-            fixtures = self.write_fixture(root)
-            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_NONDETERMINISTIC"):
                 replay_producer(fixtures, module)
 
     def test_input_mutation_is_rejected(self):
