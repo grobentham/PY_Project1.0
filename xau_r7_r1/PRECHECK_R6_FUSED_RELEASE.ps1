@@ -16,6 +16,7 @@ Set-StrictMode -Version Latest
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Work = Join-Path ([System.IO.Path]::GetTempPath()) ('XAU_R6_FUSED_PRECHECK_' + [Guid]::NewGuid().ToString('N'))
 $RuntimeStage = Join-Path $Work 'r7_runtime'
+$RequiredPrecheckVersion = 'R7_R1_R6_FUSED_RELEASE_PRECHECK_V3'
 
 function Fail([string]$Message) { throw ('R6 FUSED RELEASE PRECHECK BLOCKED: ' + $Message) }
 
@@ -67,8 +68,6 @@ if (!(Test-Path -LiteralPath $Seal -PathType Leaf)) { Fail 'producer candidate s
 $Seal = (Resolve-Path -LiteralPath $Seal).Path
 
 if ($Output -eq '') {
-    # Deliberately outside CandidateRoot: precheck output is release evidence,
-    # not candidate admission evidence, and must not contaminate resealing.
     $Output = Join-Path $Here 'R7_R1_R6_FUSED_RELEASE_PRECHECK.json'
 }
 elseif (-not [System.IO.Path]::IsPathRooted($Output)) {
@@ -98,14 +97,20 @@ try {
 
     if (!(Test-Path -LiteralPath $Output -PathType Leaf)) { Fail 'fused-release precheck report was not generated' }
     $report = Get-Content -LiteralPath $Output -Raw | ConvertFrom-Json
-    if ($report.precheck_version -ne 'R7_R1_R6_FUSED_RELEASE_PRECHECK_V2') { Fail 'unexpected precheck version' }
+    if ($report.precheck_version -ne $RequiredPrecheckVersion) { Fail 'unexpected precheck version' }
     if ($report.baseline_package_integrity -ne 'PASS') { Fail 'baseline package integrity did not pass' }
     if ($report.baseline_causal_r6_producer_ready -ne $false) { Fail 'baseline producer lock is not false' }
     if ($report.baseline_execution_hard_locked -ne $true) { Fail 'baseline execution is not hard-locked' }
     if ($report.fresh_seal_matches_supplied_seal -ne $true) { Fail 'fresh seal does not match supplied seal' }
     if ($report.candidate_admission_ready -ne $true) { Fail 'candidate admission is not ready' }
+    if ($report.canonical_reference_replay_pass -ne $true) { Fail 'canonical-reference replay authority did not pass' }
+    if ([string]::IsNullOrWhiteSpace([string]$report.authority_version)) { Fail 'precheck missing authority_version' }
     if ($report.trusted_producer_replay_pass -ne $true) { Fail 'trusted producer replay did not pass' }
     if ($report.producer_source_policy_pass -ne $true) { Fail 'producer source policy did not pass' }
+    foreach ($field in @('reference_stream_sha256','reference_replay_attestation_sha256')) {
+        $value = [string]$report.$field
+        if ($value.Length -ne 64 -or $value -notmatch '^[0-9a-fA-F]{64}$') { Fail ('precheck missing valid ' + $field) }
+    }
     if ($report.eligible_for_future_fused_build -ne $true) { Fail 'candidate is not eligible for future fused build' }
     if ($report.fused_package_created -ne $false) { Fail 'precheck may not create a fused package' }
     if ($report.readiness_switch_changed -ne $false) { Fail 'precheck may not change readiness switch' }
@@ -115,7 +120,7 @@ try {
     if ($report.successor_release_required -ne $true) { Fail 'precheck must require a separate successor release' }
 
     Write-Host ''
-    Write-Host '[PASS] Sealed R6 producer candidate passed fresh trusted replay and is eligible for a separate future fused-build step.' -ForegroundColor Green
+    Write-Host '[PASS] Sealed R6 producer candidate passed canonical-reference authority, trusted replay and parity admission.' -ForegroundColor Green
     Write-Host ('Precheck: ' + $Output)
     Write-Host 'No code was integrated, no readiness switch was changed, and execution remains locked.' -ForegroundColor Yellow
 }
