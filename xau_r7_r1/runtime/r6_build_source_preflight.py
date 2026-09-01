@@ -9,6 +9,7 @@ from typing import Any, Dict
 from .constants import CANONICAL_R6_ZIP_SHA256
 from .r6_source_bundle import (
     BUNDLE_VERSION,
+    OWNERSHIP_MARKER_NAME,
     REQUIRED_SOURCE_FILES,
     extract_canonical_source_bundle,
 )
@@ -18,7 +19,7 @@ class R6BuildSourcePreflightError(RuntimeError):
     pass
 
 
-PREFLIGHT_VERSION = "R7_R1_CANONICAL_SOURCE_BUILD_PREFLIGHT_V1"
+PREFLIGHT_VERSION = "R7_R1_CANONICAL_SOURCE_BUILD_PREFLIGHT_V2"
 
 
 def _sha256_file(path: Path) -> str:
@@ -47,11 +48,9 @@ def preflight_canonical_source(
 ) -> Dict[str, Any]:
     """Exercise canonical frozen-source extraction without strategy execution.
 
-    This is a release-build gate, not producer admission. It proves that the
-    exact parent archive can yield the frozen R5/R6 Python source dependency
-    closure and that the source probe recognizes the required engine contract.
-    Only a non-sensitive summary is returned; normalized function source stays
-    inside the temporary output_root and is removed with the build workspace.
+    This is a release-build gate, not producer admission. V2 requires Source
+    Bundle V4's output-ownership and prohibited-path protections in addition to
+    exact parent identity, dependency closure and frozen engine-contract proof.
     """
     parent_zip = Path(parent_zip).resolve()
     output_root = Path(output_root).resolve()
@@ -76,6 +75,10 @@ def preflight_canonical_source(
         raise R6BuildSourcePreflightError("CANONICAL_SOURCE_LOCAL_IMPORTS_UNRESOLVED")
     if manifest.get("dynamic_imports_allowed") is not False:
         raise R6BuildSourcePreflightError("CANONICAL_SOURCE_DYNAMIC_IMPORTS_ALLOWED")
+    if manifest.get("prohibited_source_paths_allowed") is not False:
+        raise R6BuildSourcePreflightError("CANONICAL_SOURCE_PROHIBITED_PATHS_ALLOWED")
+    if manifest.get("owned_output_replacement_only") is not True:
+        raise R6BuildSourcePreflightError("CANONICAL_SOURCE_OUTPUT_OWNERSHIP_NOT_PROVEN")
     if manifest.get("strategy_executed") is not False:
         raise R6BuildSourcePreflightError("CANONICAL_SOURCE_STRATEGY_EXECUTED")
     if manifest.get("strategy_retuned") is not False:
@@ -94,6 +97,15 @@ def preflight_canonical_source(
         raise R6BuildSourcePreflightError("CANONICAL_SOURCE_PROBE_RETUNED_STRATEGY")
     if probe.get("final_holdout_accessed") is not False:
         raise R6BuildSourcePreflightError("CANONICAL_SOURCE_PROBE_HOLDOUT_ACCESSED")
+
+    ownership_marker = output_root / OWNERSHIP_MARKER_NAME
+    if not ownership_marker.is_file() or ownership_marker.is_symlink():
+        raise R6BuildSourcePreflightError("CANONICAL_SOURCE_OWNERSHIP_MARKER_MISSING")
+    marker_hash = _sha256_file(ownership_marker)
+    if manifest.get("ownership_marker_file") != OWNERSHIP_MARKER_NAME:
+        raise R6BuildSourcePreflightError("CANONICAL_SOURCE_OWNERSHIP_MARKER_NAME_MISMATCH")
+    if manifest.get("ownership_marker_sha256") != marker_hash:
+        raise R6BuildSourcePreflightError("CANONICAL_SOURCE_OWNERSHIP_MARKER_HASH_MISMATCH")
 
     files = manifest.get("files")
     if not isinstance(files, dict):
@@ -127,6 +139,9 @@ def preflight_canonical_source(
         "source_only_bundle_verified": True,
         "dependency_closure_verified": True,
         "required_engine_contract_verified": True,
+        "prohibited_source_paths_blocked": True,
+        "owned_output_replacement_verified": True,
+        "ownership_marker_sha256": marker_hash,
         "dependency_count": int(manifest.get("dependency_count", 0)),
         "unresolved_nonarchive_import_count": unresolved_count,
         "required_source_sha256": required_hashes,
