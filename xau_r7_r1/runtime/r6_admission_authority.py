@@ -6,6 +6,16 @@ from typing import Any, Dict, Optional
 from .constants import CANONICAL_R6_ZIP_SHA256
 from .r6_integrity import sha256_file
 from .r6_producer_admission import verify_producer_admission as verify_v4_candidate_admission
+from .r6_producer_replay import (
+    MAX_EXECUTION_LINE_EVENTS,
+    MAX_FIXTURE_COUNT,
+    MAX_INPUT_DEPTH,
+    MAX_INPUT_NODES_PER_FIXTURE,
+    MAX_RANGE_ITEMS,
+    MAX_REPLAY_WALL_SECONDS,
+    REPLAY_VERSION,
+    SOURCE_POLICY_VERSION,
+)
 from .r6_reference_replay import (
     ReferenceExecutor,
     ReferenceReplayError,
@@ -20,6 +30,76 @@ class ProducerAdmissionAuthorityError(RuntimeError):
 AUTHORITY_VERSION = "R7_R1_R6_PRODUCER_ADMISSION_AUTHORITY_V5"
 
 
+def _verify_trusted_replay_security_contract(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    replay = candidate.get("trusted_replay")
+    if not isinstance(replay, dict):
+        raise ProducerAdmissionAuthorityError("TRUSTED_REPLAY_SECURITY_CONTRACT_MISSING")
+    if replay.get("replay_version") != REPLAY_VERSION:
+        raise ProducerAdmissionAuthorityError("TRUSTED_REPLAY_VERSION_MISMATCH")
+    if replay.get("source_policy_version") != SOURCE_POLICY_VERSION:
+        raise ProducerAdmissionAuthorityError("TRUSTED_REPLAY_SOURCE_POLICY_VERSION_MISMATCH")
+    required_true = (
+        "deterministic_double_run",
+        "source_policy_pass",
+        "range_is_bounded",
+        "execution_line_budget_enforced",
+        "process_isolation_enforced",
+    )
+    for key in required_true:
+        if replay.get(key) is not True:
+            raise ProducerAdmissionAuthorityError("TRUSTED_REPLAY_REQUIRED_GUARD_MISSING:" + key)
+    required_false = (
+        "imports_allowed",
+        "classes_allowed",
+        "while_loops_allowed",
+        "exception_handling_allowed",
+        "function_decorators_allowed",
+        "function_annotations_allowed",
+        "mutable_top_level_state_allowed",
+        "mutable_or_executable_defaults_allowed",
+        "dunder_access_allowed",
+        "filesystem_api_allowed",
+        "network_api_allowed",
+        "dynamic_import_allowed",
+        "future_rows_available_to_producer",
+        "outcome_columns_present",
+        "final_holdout_accessed",
+        "strategy_retuned",
+    )
+    for key in required_false:
+        if replay.get(key) is not False:
+            raise ProducerAdmissionAuthorityError("TRUSTED_REPLAY_FORBIDDEN_GUARD_ENABLED:" + key)
+    if replay.get("producer_input_mutation_count") != 0:
+        raise ProducerAdmissionAuthorityError("TRUSTED_REPLAY_INPUT_MUTATION_PRESENT")
+    exact_limits = {
+        "max_fixture_count": MAX_FIXTURE_COUNT,
+        "max_input_depth": MAX_INPUT_DEPTH,
+        "max_input_nodes_per_fixture": MAX_INPUT_NODES_PER_FIXTURE,
+        "max_range_items": MAX_RANGE_ITEMS,
+        "max_execution_line_events": MAX_EXECUTION_LINE_EVENTS,
+    }
+    for key, expected in exact_limits.items():
+        value = replay.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value != expected:
+            raise ProducerAdmissionAuthorityError("TRUSTED_REPLAY_RESOURCE_LIMIT_MISMATCH:" + key)
+    timeout = replay.get("wall_timeout_seconds")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or float(timeout) != float(MAX_REPLAY_WALL_SECONDS):
+        raise ProducerAdmissionAuthorityError("TRUSTED_REPLAY_WALL_TIMEOUT_MISMATCH")
+    worker_hash = replay.get("worker_module_sha256")
+    if not isinstance(worker_hash, str) or len(worker_hash) != 64:
+        raise ProducerAdmissionAuthorityError("TRUSTED_REPLAY_WORKER_HASH_INVALID")
+    if any(ch not in "0123456789abcdef" for ch in worker_hash.lower()):
+        raise ProducerAdmissionAuthorityError("TRUSTED_REPLAY_WORKER_HASH_INVALID")
+    return {
+        "replay_version": REPLAY_VERSION,
+        "source_policy_version": SOURCE_POLICY_VERSION,
+        "process_isolation_enforced": True,
+        "worker_module_sha256": worker_hash.lower(),
+        "wall_timeout_seconds": float(MAX_REPLAY_WALL_SECONDS),
+        **exact_limits,
+    }
+
+
 def verify_producer_admission(
     root: Path,
     *,
@@ -27,13 +107,12 @@ def verify_producer_admission(
 ) -> Dict[str, Any]:
     """Authoritative producer admission.
 
-    V4 candidate admission proves the candidate module generated its producer
-    stream and matches a supplied reference stream. V5 adds the independent
-    authority boundary: the reference stream itself must be regenerated from
-    the exact canonical frozen R6 source bundle. The production executor is
-    deliberately unavailable until that exact-source adapter is implemented,
-    so production admission remains fail-closed rather than trusting a supplied
-    reference stream.
+    Candidate admission proves the candidate module generated its producer
+    stream and matches a supplied reference stream. V5 adds two independent
+    authority boundaries: the reference stream must be regenerated from exact
+    canonical frozen R6 source, and candidate replay must satisfy the current
+    isolated/resource-bounded replay security contract. Production remains
+    fail-closed while the exact-source reference executor is unavailable.
     """
     root = Path(root).resolve()
     source_bundle_manifest_path = root / "R7_R1_R6_SOURCE_BUNDLE_MANIFEST.json"
@@ -66,6 +145,8 @@ def verify_producer_admission(
     if candidate.get("strategy_retuned") is not False:
         raise ProducerAdmissionAuthorityError("V4_CANDIDATE_RETUNING_BREACH")
 
+    replay_contract = _verify_trusted_replay_security_contract(candidate)
+
     parity = candidate.get("parity")
     if not isinstance(parity, dict) or parity.get("parity_pass") is not True:
         raise ProducerAdmissionAuthorityError("V4_CANDIDATE_PARITY_NOT_PASS")
@@ -80,6 +161,8 @@ def verify_producer_admission(
         **candidate,
         "authority_version": AUTHORITY_VERSION,
         "ready": True,
+        "trusted_replay_security_contract": replay_contract,
+        "trusted_replay_security_contract_pass": True,
         "canonical_reference_replay": reference,
         "canonical_reference_replay_pass": True,
         "reference_attestation_sha256": sha256_file(reference_attestation_path),
@@ -96,6 +179,7 @@ def producer_admission_status(root: Path) -> Dict[str, Any]:
             "authority_version": AUTHORITY_VERSION,
             "ready": False,
             "reason": str(exc),
+            "trusted_replay_security_contract_pass": False,
             "canonical_parent_zip_sha256": CANONICAL_R6_ZIP_SHA256,
             "canonical_reference_replay_pass": False,
             "final_holdout_accessed": False,
