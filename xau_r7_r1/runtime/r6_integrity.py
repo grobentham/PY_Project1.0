@@ -21,7 +21,15 @@ REQUIRED_R7_OPERATOR_FILES = frozenset({
     "R7_R1_REPAIR_AUDIT.md",
 })
 
-OPERATOR_AUTHORITY_CONTRACT_VERSION = "R7_R1_OPERATOR_AUTHORITY_CONTRACT_V1"
+OPERATOR_AUTHORITY_CONTRACT_VERSION = "R7_R1_OPERATOR_AUTHORITY_CONTRACT_V2"
+_REQUIRED_EXTRACT_WRAPPER_TOKENS = (
+    "R7_R1_R6_SOURCE_BUNDLE_V4",
+    "R7_R1_R6_SOURCE_PROBE_V2",
+    "prohibited_source_paths_allowed",
+    "owned_output_replacement_only",
+    "ownership_marker_sha256",
+    ".R7_R1_SOURCE_BUNDLE_OWNERSHIP.json",
+)
 _REQUIRED_SEAL_WRAPPER_TOKENS = (
     "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
     "R7_R1_R6_PRODUCER_REPLAY_V4",
@@ -41,6 +49,7 @@ _REQUIRED_PRECHECK_WRAPPER_TOKENS = (
     "wall_timeout_seconds",
 )
 _LEGACY_OPERATOR_TOKENS = (
+    "R7_R1_R6_SOURCE_BUNDLE_V3",
     "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3",
     "R7_R1_R6_FUSED_RELEASE_PRECHECK_V3",
 )
@@ -116,7 +125,6 @@ def _find_suffix(root: Path, suffix: str) -> Path:
 
 
 def collect_protected_hashes(root: Path) -> Dict[str, str]:
-    """Legacy discovery helper; runtime verification uses exact manifest paths."""
     root = Path(root).resolve()
     out: Dict[str, str] = {}
     for suffix in PROTECTED_R6_PATH_SUFFIXES:
@@ -130,16 +138,12 @@ def verify_runtime_parent_integrity(root: Path, manifest_path: Optional[Path] = 
     manifest_path = manifest_path or root / "R7_R1_PARENT_INTEGRITY.json"
     data = _load_manifest(manifest_path)
     expected = _normalize_hash_map(data.get("protected_r6_hashes"), "PROTECTED_R6_HASHES")
-
-    resolved_by_suffix: Dict[str, str] = {}
     for suffix in PROTECTED_R6_PATH_SUFFIXES:
         matches = [relative for relative in expected if relative.endswith(suffix)]
         if len(matches) != 1:
             raise IntegrityError(f"PROTECTED_MANIFEST_PATH_RESOLUTION_FAILED:{suffix}:matches={len(matches)}")
-        resolved_by_suffix[suffix] = matches[0]
     if len(expected) != len(PROTECTED_R6_PATH_SUFFIXES):
         raise IntegrityError("PROTECTED_R6_MANIFEST_PATH_SET_CHANGED")
-
     actual: Dict[str, str] = {}
     failures = []
     for relative, digest in expected.items():
@@ -209,29 +213,37 @@ def _read_operator_text(root: Path, relative: str) -> str:
         raise IntegrityError("R7_OPERATOR_AUTHORITY_FILE_UNREADABLE:" + relative) from exc
 
 
-def verify_operator_authority_contract(root: Path) -> Dict[str, Any]:
-    """Require current certification semantics in addition to manifest-consistent hashes.
+def _require_tokens(text: str, tokens: Iterable[str], prefix: str) -> None:
+    for token in tokens:
+        if token not in text:
+            raise IntegrityError(prefix + ":" + token)
 
-    A locally rebuilt package must not become valid merely because a stale V3
-    wrapper and its matching stale hash were written into the same manifest.
-    This semantic contract is checked on every runtime package-integrity pass.
+
+def verify_operator_authority_contract(root: Path) -> Dict[str, Any]:
+    """Require current certification semantics in addition to matching hashes.
+
+    This blocks a locally rebuilt package from validating merely because a
+    stale wrapper and its matching stale hash were written into one manifest.
     """
     root = Path(root).resolve()
+    extract_text = _read_operator_text(root, "EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1")
     seal_text = _read_operator_text(root, "SEAL_R6_PRODUCER_CANDIDATE.ps1")
     precheck_text = _read_operator_text(root, "PRECHECK_R6_FUSED_RELEASE.ps1")
 
-    for token in _REQUIRED_SEAL_WRAPPER_TOKENS:
-        if token not in seal_text:
-            raise IntegrityError("R7_OPERATOR_SEAL_AUTHORITY_TOKEN_MISSING:" + token)
-    for token in _REQUIRED_PRECHECK_WRAPPER_TOKENS:
-        if token not in precheck_text:
-            raise IntegrityError("R7_OPERATOR_PRECHECK_AUTHORITY_TOKEN_MISSING:" + token)
+    _require_tokens(extract_text, _REQUIRED_EXTRACT_WRAPPER_TOKENS, "R7_OPERATOR_EXTRACT_AUTHORITY_TOKEN_MISSING")
+    _require_tokens(seal_text, _REQUIRED_SEAL_WRAPPER_TOKENS, "R7_OPERATOR_SEAL_AUTHORITY_TOKEN_MISSING")
+    _require_tokens(precheck_text, _REQUIRED_PRECHECK_WRAPPER_TOKENS, "R7_OPERATOR_PRECHECK_AUTHORITY_TOKEN_MISSING")
+    combined = extract_text + "\n" + seal_text + "\n" + precheck_text
     for token in _LEGACY_OPERATOR_TOKENS:
-        if token in seal_text or token in precheck_text:
+        if token in combined:
             raise IntegrityError("R7_OPERATOR_LEGACY_AUTHORITY_TOKEN_PRESENT:" + token)
 
     return {
         "operator_authority_contract_version": OPERATOR_AUTHORITY_CONTRACT_VERSION,
+        "source_bundle_version": "R7_R1_R6_SOURCE_BUNDLE_V4",
+        "source_probe_version": "R7_R1_R6_SOURCE_PROBE_V2",
+        "source_owned_output_replacement_required": True,
+        "source_prohibited_paths_blocked": True,
         "candidate_seal_version": "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
         "fused_precheck_version": "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4",
         "producer_replay_version": "R7_R1_R6_PRODUCER_REPLAY_V4",
@@ -247,7 +259,6 @@ def verify_runtime_package_integrity(root: Path, manifest_path: Optional[Path] =
     root = Path(root).resolve()
     manifest_path = manifest_path or root / "R7_R1_PARENT_INTEGRITY.json"
     data = _load_manifest(manifest_path)
-
     if data.get("canonical_parent_zip_sha256") != CANONICAL_R6_ZIP_SHA256:
         raise IntegrityError("MANIFEST_CANONICAL_PARENT_SHA_MISMATCH")
     if data.get("build_verified_parent_zip_sha256") != CANONICAL_R6_ZIP_SHA256:
@@ -265,7 +276,6 @@ def verify_runtime_package_integrity(root: Path, manifest_path: Optional[Path] =
 
     verify_parent_tree_unchanged(root, manifest_path)
     protected = verify_runtime_parent_integrity(root, manifest_path)
-
     original_launcher_hash = data.get("original_start_xau_sha256")
     if not isinstance(original_launcher_hash, str) or len(original_launcher_hash) != 64:
         raise IntegrityError("ORIGINAL_R6_LAUNCHER_HASH_MISSING")
@@ -278,18 +288,14 @@ def verify_runtime_package_integrity(root: Path, manifest_path: Optional[Path] =
     if set(r7_hashes) != actual_runtime_paths:
         missing = sorted(actual_runtime_paths - set(r7_hashes))
         extra = sorted(set(r7_hashes) - actual_runtime_paths)
-        raise IntegrityError(
-            "R7_RUNTIME_CODE_PATH_SET_MISMATCH:untracked=" + ",".join(missing) + ";missing=" + ",".join(extra)
-        )
+        raise IntegrityError("R7_RUNTIME_CODE_PATH_SET_MISMATCH:untracked=" + ",".join(missing) + ";missing=" + ",".join(extra))
     _verify_hash_map(root, r7_hashes, "R7_RUNTIME_CODE_HASH_MISMATCH")
 
     operator_hashes = _normalize_hash_map(data.get("r7_operator_tool_sha256"), "R7_OPERATOR_TOOL_HASHES")
     if set(operator_hashes) != REQUIRED_R7_OPERATOR_FILES:
         missing = sorted(REQUIRED_R7_OPERATOR_FILES - set(operator_hashes))
         extra = sorted(set(operator_hashes) - REQUIRED_R7_OPERATOR_FILES)
-        raise IntegrityError(
-            "R7_OPERATOR_TOOL_PATH_SET_MISMATCH:missing=" + ",".join(missing) + ";extra=" + ",".join(extra)
-        )
+        raise IntegrityError("R7_OPERATOR_TOOL_PATH_SET_MISMATCH:missing=" + ",".join(missing) + ";extra=" + ",".join(extra))
     _verify_hash_map(root, operator_hashes, "R7_OPERATOR_TOOL_HASH_MISMATCH")
     operator_authority = verify_operator_authority_contract(root)
 
