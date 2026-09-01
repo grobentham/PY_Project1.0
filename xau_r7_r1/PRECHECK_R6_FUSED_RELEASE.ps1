@@ -16,7 +16,9 @@ Set-StrictMode -Version Latest
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Work = Join-Path ([System.IO.Path]::GetTempPath()) ('XAU_R6_FUSED_PRECHECK_' + [Guid]::NewGuid().ToString('N'))
 $RuntimeStage = Join-Path $Work 'r7_runtime'
-$RequiredPrecheckVersion = 'R7_R1_R6_FUSED_RELEASE_PRECHECK_V3'
+$RequiredPrecheckVersion = 'R7_R1_R6_FUSED_RELEASE_PRECHECK_V4'
+$RequiredReplayVersion = 'R7_R1_R6_PRODUCER_REPLAY_V4'
+$RequiredSourcePolicyVersion = 'R7_R1_R6_PRODUCER_SOURCE_POLICY_V4'
 
 function Fail([string]$Message) { throw ('R6 FUSED RELEASE PRECHECK BLOCKED: ' + $Message) }
 
@@ -51,6 +53,23 @@ function Assert-PackagedSelfIntegrity($Python) {
         )
     }
     finally { Pop-Location }
+}
+
+function Assert-ReplaySecurityContract($ReportObject) {
+    if ($ReportObject.trusted_replay_security_contract_pass -ne $true) { Fail 'precheck did not prove replay security contract' }
+    $contract = $ReportObject.trusted_replay_security_contract
+    if ($null -eq $contract) { Fail 'precheck missing replay security contract' }
+    if ([string]$contract.replay_version -ne $RequiredReplayVersion) { Fail 'precheck replay version mismatch' }
+    if ([string]$contract.source_policy_version -ne $RequiredSourcePolicyVersion) { Fail 'precheck source-policy version mismatch' }
+    if ($contract.process_isolation_enforced -ne $true) { Fail 'precheck did not prove replay process isolation' }
+    $workerHash = [string]$contract.worker_module_sha256
+    if ($workerHash.Length -ne 64 -or $workerHash -notmatch '^[0-9a-fA-F]{64}$') { Fail 'precheck replay worker SHA-256 invalid' }
+    $wallTimeout = [double]$contract.wall_timeout_seconds
+    if ($wallTimeout -le 0) { Fail 'precheck replay wall timeout invalid' }
+    foreach ($field in @('max_fixture_count','max_input_depth','max_input_nodes_per_fixture','max_range_items','max_execution_line_events')) {
+        $value = [long]$contract.$field
+        if ($value -le 0) { Fail ('precheck replay resource limit invalid: ' + $field) }
+    }
 }
 
 $RuntimeRoot = (Resolve-Path -LiteralPath $RuntimeRoot).Path
@@ -101,13 +120,14 @@ try {
     if ($report.baseline_package_integrity -ne 'PASS') { Fail 'baseline package integrity did not pass' }
     if ($report.baseline_causal_r6_producer_ready -ne $false) { Fail 'baseline producer lock is not false' }
     if ($report.baseline_execution_hard_locked -ne $true) { Fail 'baseline execution is not hard-locked' }
-    if ($report.fresh_seal_matches_supplied_seal -ne $true) { Fail 'fresh seal does not match supplied seal' }
+    if ($report.fresh_seal_matches_supplied_seal -ne $true) { Fail 'fresh V4 seal does not match supplied V4 seal' }
     if ($report.candidate_admission_ready -ne $true) { Fail 'candidate admission is not ready' }
+    Assert-ReplaySecurityContract $report
     if ($report.canonical_reference_replay_pass -ne $true) { Fail 'canonical-reference replay authority did not pass' }
     if ([string]::IsNullOrWhiteSpace([string]$report.authority_version)) { Fail 'precheck missing authority_version' }
     if ($report.trusted_producer_replay_pass -ne $true) { Fail 'trusted producer replay did not pass' }
     if ($report.producer_source_policy_pass -ne $true) { Fail 'producer source policy did not pass' }
-    foreach ($field in @('reference_stream_sha256','reference_replay_attestation_sha256')) {
+    foreach ($field in @('reference_stream_sha256','reference_replay_attestation_sha256','producer_replay_attestation_sha256')) {
         $value = [string]$report.$field
         if ($value.Length -ne 64 -or $value -notmatch '^[0-9a-fA-F]{64}$') { Fail ('precheck missing valid ' + $field) }
     }
@@ -120,7 +140,7 @@ try {
     if ($report.successor_release_required -ne $true) { Fail 'precheck must require a separate successor release' }
 
     Write-Host ''
-    Write-Host '[PASS] Sealed R6 producer candidate passed canonical-reference authority, trusted replay and parity admission.' -ForegroundColor Green
+    Write-Host '[PASS] V4-sealed R6 producer candidate passed V5 canonical-reference authority and isolated replay-security precheck.' -ForegroundColor Green
     Write-Host ('Precheck: ' + $Output)
     Write-Host 'No code was integrated, no readiness switch was changed, and execution remains locked.' -ForegroundColor Yellow
 }
