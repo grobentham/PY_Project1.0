@@ -14,7 +14,9 @@ Set-StrictMode -Version Latest
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Work = Join-Path ([System.IO.Path]::GetTempPath()) ('XAU_R6_PRODUCER_SEAL_' + [Guid]::NewGuid().ToString('N'))
 $RuntimeStage = Join-Path $Work 'r7_runtime'
-$RequiredSealVersion = 'R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V3'
+$RequiredSealVersion = 'R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4'
+$RequiredReplayVersion = 'R7_R1_R6_PRODUCER_REPLAY_V4'
+$RequiredSourcePolicyVersion = 'R7_R1_R6_PRODUCER_SOURCE_POLICY_V4'
 
 function Fail([string]$Message) { throw ('R6 PRODUCER SEAL BLOCKED: ' + $Message) }
 
@@ -49,6 +51,23 @@ function Assert-PackagedSelfIntegrity($Python) {
         )
     }
     finally { Pop-Location }
+}
+
+function Assert-ReplaySecurityContract($SealObject) {
+    if ($SealObject.trusted_replay_security_contract_pass -ne $true) { Fail 'candidate seal did not prove replay security contract' }
+    $contract = $SealObject.trusted_replay_security_contract
+    if ($null -eq $contract) { Fail 'candidate seal missing replay security contract' }
+    if ([string]$contract.replay_version -ne $RequiredReplayVersion) { Fail 'candidate seal replay version mismatch' }
+    if ([string]$contract.source_policy_version -ne $RequiredSourcePolicyVersion) { Fail 'candidate seal source-policy version mismatch' }
+    if ($contract.process_isolation_enforced -ne $true) { Fail 'candidate seal did not prove replay process isolation' }
+    $workerHash = [string]$contract.worker_module_sha256
+    if ($workerHash.Length -ne 64 -or $workerHash -notmatch '^[0-9a-fA-F]{64}$') { Fail 'candidate seal replay worker SHA-256 invalid' }
+    $wallTimeout = [double]$contract.wall_timeout_seconds
+    if ($wallTimeout -le 0) { Fail 'candidate seal replay wall timeout invalid' }
+    foreach ($field in @('max_fixture_count','max_input_depth','max_input_nodes_per_fixture','max_range_items','max_execution_line_events')) {
+        $value = [long]$contract.$field
+        if ($value -le 0) { Fail ('candidate seal replay resource limit invalid: ' + $field) }
+    }
 }
 
 $RuntimeRoot = (Resolve-Path -LiteralPath $RuntimeRoot).Path
@@ -89,6 +108,7 @@ try {
     $seal = Get-Content -LiteralPath $Output -Raw | ConvertFrom-Json
     if ($seal.seal_version -ne $RequiredSealVersion) { Fail 'unexpected candidate seal version' }
     if ($seal.admission_ready -ne $true) { Fail 'candidate seal did not prove admission readiness' }
+    Assert-ReplaySecurityContract $seal
     if ($seal.canonical_reference_replay_pass -ne $true) { Fail 'candidate seal did not prove canonical-reference replay authority' }
     if ([string]::IsNullOrWhiteSpace([string]$seal.authority_version)) { Fail 'candidate seal missing authority_version' }
     if ($seal.trusted_producer_replay_pass -ne $true) { Fail 'candidate seal did not prove trusted producer replay' }
@@ -109,7 +129,7 @@ try {
     if ($seal.strategy_retuned -ne $false) { Fail 'candidate seal reports strategy retuning' }
 
     Write-Host ''
-    Write-Host '[PASS] R6 causal-producer candidate sealed after canonical-reference authority, trusted replay and parity admission.' -ForegroundColor Green
+    Write-Host '[PASS] R6 causal-producer V4 candidate sealed after V5 canonical-reference authority and isolated replay-security verification.' -ForegroundColor Green
     Write-Host ('Seal: ' + $Output)
     Write-Host 'The baseline runtime was not modified and execution remains locked.' -ForegroundColor Yellow
 }
