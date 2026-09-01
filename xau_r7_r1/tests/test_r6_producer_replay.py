@@ -48,6 +48,7 @@ class ProducerReplayTests(unittest.TestCase):
             self.assertFalse(report["imports_allowed"])
             self.assertFalse(report["dunder_access_allowed"])
             self.assertFalse(report["while_loops_allowed"])
+            self.assertFalse(report["exception_handling_allowed"])
             self.assertFalse(report["mutable_top_level_state_allowed"])
             self.assertFalse(report["mutable_or_executable_defaults_allowed"])
             self.assertTrue(report["range_is_bounded"])
@@ -120,6 +121,20 @@ class ProducerReplayTests(unittest.TestCase):
                 verify_producer_source_policy(module)
             module = self.write_module(root, 'def produce(prefix: int):\n    return None\n')
             with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_FUNCTION_ANNOTATION_FORBIDDEN"):
+                verify_producer_source_policy(module)
+
+    def test_exception_handling_is_forbidden_so_budget_errors_cannot_be_swallowed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            module = self.write_module(
+                root,
+                'def produce(prefix):\n'
+                '    try:\n'
+                '        return {"x": sum(range(10))}\n'
+                '    except Exception:\n'
+                '        return None\n',
+            )
+            with self.assertRaisesRegex(ProducerReplayError, "PRODUCER_EXCEPTION_HANDLING_FORBIDDEN"):
                 verify_producer_source_policy(module)
 
     def test_unbounded_while_loop_is_forbidden_before_execution(self):
