@@ -152,6 +152,13 @@ class PackageIntegrityTests(unittest.TestCase):
     def seal_wrapper_text() -> str:
         return "\n".join((
             "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
+            "R7_R1_R6_SOURCE_BUNDLE_V4",
+            "source_bundle_security_contract_pass",
+            "reference_source_security_contract_pass",
+            "static_dependency_closure_recomputed",
+            "source_bundle_static_closure_recomputed",
+            "source_bundle_dynamic_import_policy_recomputed",
+            "reference_generated_by_exact_canonical_source_executor",
             "R7_R1_R6_PRODUCER_REPLAY_V4",
             "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
             "trusted_replay_security_contract_pass",
@@ -164,6 +171,13 @@ class PackageIntegrityTests(unittest.TestCase):
     def precheck_wrapper_text() -> str:
         return "\n".join((
             "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4",
+            "R7_R1_R6_SOURCE_BUNDLE_V4",
+            "source_bundle_security_contract_pass",
+            "reference_source_security_contract_pass",
+            "static_dependency_closure_recomputed",
+            "source_bundle_static_closure_recomputed",
+            "source_bundle_dynamic_import_policy_recomputed",
+            "reference_generated_by_exact_canonical_source_executor",
             "R7_R1_R6_PRODUCER_REPLAY_V4",
             "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
             "trusted_replay_security_contract_pass",
@@ -248,6 +262,8 @@ class PackageIntegrityTests(unittest.TestCase):
             self.assertEqual(contract["source_bundle_version"], "R7_R1_R6_SOURCE_BUNDLE_V4")
             self.assertTrue(contract["source_owned_output_replacement_required"])
             self.assertTrue(contract["source_prohibited_paths_blocked"])
+            self.assertTrue(contract["source_provenance_contract_required"])
+            self.assertTrue(contract["reference_preexecution_source_proof_required"])
             self.assertTrue(contract["legacy_v3_rejected"])
 
     def test_hash_consistent_v3_extract_wrapper_is_still_rejected_semantically(self):
@@ -298,6 +314,20 @@ class PackageIntegrityTests(unittest.TestCase):
             self.rehash_operator(root, rel)
             with self.assertRaisesRegex(IntegrityError, "R7_OPERATOR_PRECHECK_AUTHORITY_TOKEN_MISSING|R7_OPERATOR_LEGACY_AUTHORITY_TOKEN_PRESENT"):
                 verify_runtime_package_integrity(root)
+
+    def test_hash_consistent_source_provenance_removal_is_rejected_semantically(self):
+        for rel, prefix in (
+            ("SEAL_R6_PRODUCER_CANDIDATE.ps1", "R7_OPERATOR_SEAL_AUTHORITY_TOKEN_MISSING"),
+            ("PRECHECK_R6_FUSED_RELEASE.ps1", "R7_OPERATOR_PRECHECK_AUTHORITY_TOKEN_MISSING"),
+        ):
+            with self.subTest(rel=rel), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                self.build_fake_package(root)
+                target = root / rel
+                target.write_text(target.read_text(encoding="utf-8").replace("source_bundle_security_contract_pass", "SOURCE_PROVENANCE_GUARD_REMOVED"), encoding="utf-8")
+                self.rehash_operator(root, rel)
+                with self.assertRaisesRegex(IntegrityError, prefix + ":source_bundle_security_contract_pass"):
+                    verify_runtime_package_integrity(root)
 
     def test_hash_consistent_process_isolation_removal_is_rejected_semantically(self):
         with tempfile.TemporaryDirectory() as td:
