@@ -23,6 +23,16 @@ class ConfigTests(unittest.TestCase):
         p.write_text(json.dumps(value), encoding="utf-8")
         return p
 
+    @staticmethod
+    def v5_admission_status():
+        return {
+            "ready": True,
+            "authority_version": "R7_R1_R6_PRODUCER_ADMISSION_AUTHORITY_V5",
+            "canonical_reference_replay_pass": True,
+            "final_holdout_accessed": False,
+            "strategy_retuned": False,
+        }
+
     def test_valid_restrictive_config(self):
         with tempfile.TemporaryDirectory() as td:
             p = self.write_config(Path(td), {
@@ -79,15 +89,43 @@ class ConfigTests(unittest.TestCase):
                     self.assertFalse(runtime.producer_execution_admitted())
                     self.assertFalse(runtime.demo_execution_enabled(cfg))
 
-    def test_demo_execution_needs_admitted_producer_config_and_exact_environment_unlock(self):
+    def test_v4_ready_status_cannot_bypass_v5_reference_authority(self):
+        cfg = {"request_demo_execution": True}
+        env = {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "YES_I_ACCEPT_DEMO_ONLY"}
+        legacy_v4 = {
+            "ready": True,
+            "admission_version": "R7_R1_R6_PRODUCER_ADMISSION_V4",
+            "final_holdout_accessed": False,
+            "strategy_retuned": False,
+        }
+        with mock.patch.object(runtime, "CAUSAL_R6_PRODUCER_READY", True):
+            with mock.patch.object(runtime, "producer_admission_status", return_value=legacy_v4):
+                with mock.patch.dict(os.environ, env, clear=True):
+                    self.assertFalse(runtime.producer_execution_admitted())
+                    self.assertFalse(runtime.demo_execution_enabled(cfg))
+
+    def test_v5_authority_requires_clean_reference_holdout_and_retune_flags(self):
+        with mock.patch.object(runtime, "CAUSAL_R6_PRODUCER_READY", True):
+            for field, value in (
+                ("canonical_reference_replay_pass", False),
+                ("final_holdout_accessed", True),
+                ("strategy_retuned", True),
+            ):
+                status = self.v5_admission_status()
+                status[field] = value
+                with mock.patch.object(runtime, "producer_admission_status", return_value=status):
+                    self.assertFalse(runtime.producer_execution_admitted(), field)
+
+    def test_demo_execution_needs_v5_admitted_producer_config_and_exact_environment_unlock(self):
         cfg = {"request_demo_execution": True}
         with mock.patch.object(runtime, "CAUSAL_R6_PRODUCER_READY", True):
-            with mock.patch.object(runtime, "producer_admission_status", return_value={"ready": True}):
+            with mock.patch.object(runtime, "producer_admission_status", return_value=self.v5_admission_status()):
                 with mock.patch.dict(os.environ, {}, clear=True):
                     self.assertFalse(runtime.demo_execution_enabled(cfg))
                 with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "wrong"}, clear=True):
                     self.assertFalse(runtime.demo_execution_enabled(cfg))
                 with mock.patch.dict(os.environ, {"XAU_R7_R1_ENABLE_DEMO_EXECUTION": "YES_I_ACCEPT_DEMO_ONLY"}, clear=True):
+                    self.assertTrue(runtime.producer_execution_admitted())
                     self.assertTrue(runtime.demo_execution_enabled(cfg))
 
 
