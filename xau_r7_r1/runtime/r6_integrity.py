@@ -21,7 +21,7 @@ REQUIRED_R7_OPERATOR_FILES = frozenset({
     "R7_R1_REPAIR_AUDIT.md",
 })
 
-OPERATOR_AUTHORITY_CONTRACT_VERSION = "R7_R1_OPERATOR_AUTHORITY_CONTRACT_V2"
+OPERATOR_AUTHORITY_CONTRACT_VERSION = "R7_R1_OPERATOR_AUTHORITY_CONTRACT_V3"
 _REQUIRED_EXTRACT_WRAPPER_TOKENS = (
     "R7_R1_R6_SOURCE_BUNDLE_V4",
     "R7_R1_R6_SOURCE_PROBE_V2",
@@ -32,6 +32,13 @@ _REQUIRED_EXTRACT_WRAPPER_TOKENS = (
 )
 _REQUIRED_SEAL_WRAPPER_TOKENS = (
     "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
+    "R7_R1_R6_SOURCE_BUNDLE_V4",
+    "source_bundle_security_contract_pass",
+    "reference_source_security_contract_pass",
+    "static_dependency_closure_recomputed",
+    "source_bundle_static_closure_recomputed",
+    "source_bundle_dynamic_import_policy_recomputed",
+    "reference_generated_by_exact_canonical_source_executor",
     "R7_R1_R6_PRODUCER_REPLAY_V4",
     "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
     "trusted_replay_security_contract_pass",
@@ -41,6 +48,13 @@ _REQUIRED_SEAL_WRAPPER_TOKENS = (
 )
 _REQUIRED_PRECHECK_WRAPPER_TOKENS = (
     "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4",
+    "R7_R1_R6_SOURCE_BUNDLE_V4",
+    "source_bundle_security_contract_pass",
+    "reference_source_security_contract_pass",
+    "static_dependency_closure_recomputed",
+    "source_bundle_static_closure_recomputed",
+    "source_bundle_dynamic_import_policy_recomputed",
+    "reference_generated_by_exact_canonical_source_executor",
     "R7_R1_R6_PRODUCER_REPLAY_V4",
     "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
     "trusted_replay_security_contract_pass",
@@ -220,11 +234,7 @@ def _require_tokens(text: str, tokens: Iterable[str], prefix: str) -> None:
 
 
 def verify_operator_authority_contract(root: Path) -> Dict[str, Any]:
-    """Require current certification semantics in addition to matching hashes.
-
-    This blocks a locally rebuilt package from validating merely because a
-    stale wrapper and its matching stale hash were written into one manifest.
-    """
+    """Require current certification semantics in addition to matching hashes."""
     root = Path(root).resolve()
     extract_text = _read_operator_text(root, "EXTRACT_CANONICAL_R6_PRODUCER_SOURCE.ps1")
     seal_text = _read_operator_text(root, "SEAL_R6_PRODUCER_CANDIDATE.ps1")
@@ -246,6 +256,8 @@ def verify_operator_authority_contract(root: Path) -> Dict[str, Any]:
         "source_prohibited_paths_blocked": True,
         "candidate_seal_version": "R7_R1_R6_PRODUCER_CANDIDATE_SEAL_V4",
         "fused_precheck_version": "R7_R1_R6_FUSED_RELEASE_PRECHECK_V4",
+        "source_provenance_contract_required": True,
+        "reference_preexecution_source_proof_required": True,
         "producer_replay_version": "R7_R1_R6_PRODUCER_REPLAY_V4",
         "producer_source_policy_version": "R7_R1_R6_PRODUCER_SOURCE_POLICY_V4",
         "replay_security_contract_required": True,
